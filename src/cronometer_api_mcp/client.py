@@ -81,6 +81,11 @@ NUTRIENT_IDS = {
 # "oz" measure it attaches to every recipe.
 _OZ_GRAMS = 28.3495231
 
+# Measures create_recipe attaches to every recipe besides its serving. The
+# server keeps "full recipe" equal to the batch weight on every save.
+_FULL_RECIPE_MEASURE = "full recipe"
+_RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
+
 # Nutrient IDs create_custom_food() already writes via its named macro args
 # (including the derived/negative-ID duplicates it sends alongside them).
 # extra_nutrients must not reuse one of these -- see create_custom_food().
@@ -757,7 +762,7 @@ class CronometerClient:
     # Custom food edit / retire
     # ------------------------------------------------------------------
 
-    def _save_custom_food(self, food: dict) -> dict:
+    def _save_food(self, food: dict) -> dict:
         """Re-send a full food object to /api/v2/add_food, which upserts.
 
         A non-zero id edits that food in place (verified against the live API:
@@ -770,11 +775,11 @@ class CronometerClient:
         payload = {"data": data, "config": {"call_version": 1}}
         resp = self._request("/api/v2/add_food", payload)
         if resp.get("id") != data["id"]:
-            raise CronometerError(f"Failed to save custom food {data['id']}: {resp}")
+            raise CronometerError(f"Failed to save food {data['id']}: {resp}")
         return resp
 
     def _food_lock(self, food_id: int) -> threading.Lock:
-        """The lock serializing edits of one custom food; see __init__."""
+        """The lock serializing edits of one custom food or recipe; see __init__."""
         with self._food_locks_guard:
             lock = self._food_locks.get(food_id)
             if lock is None:
@@ -791,7 +796,8 @@ class CronometerClient:
         User-created recipes report source "Custom" too, but they carry an
         `ingredients` array their nutrient totals are derived from, and their
         measures follow different rules. Editing one as a plain food would
-        leave it inconsistent, so recipes are refused as well.
+        leave it inconsistent, so recipes are refused here and go through
+        update_recipe / retire_recipe instead.
         """
         food = self.get_food(food_id)
         if food.get("source") != "Custom":
@@ -801,8 +807,8 @@ class CronometerClient:
             )
         if food.get("ingredients"):
             raise CronometerError(
-                f"Food {food_id} ({food.get('name')!r}) is a recipe; only plain "
-                f"custom foods can be edited or deleted"
+                f"Food {food_id} ({food.get('name')!r}) is a recipe; use "
+                f"update_recipe / delete_recipe instead"
             )
         return food
 
@@ -949,7 +955,7 @@ class CronometerClient:
                 fiber = by_id.get(NUTRIENT_IDS["fiber"], {}).get("amount", 0)
                 set_amount(NUTRIENT_IDS["net_carbs"], round(max(0, carbs - fiber), 2))
 
-            self._save_custom_food(food)
+            self._save_food(food)
         logger.info("Updated custom food %r (id=%d)", food["name"], food_id)
         return {"food_id": food_id, "name": food["name"]}
 
@@ -967,7 +973,7 @@ class CronometerClient:
         with self._food_lock(food_id):
             food = self._get_custom_food(food_id)
             food["retired"] = True
-            self._save_custom_food(food)
+            self._save_food(food)
         logger.info("Retired custom food %r (id=%d)", food.get("name"), food_id)
         return {"food_id": food_id, "name": food.get("name"), "retired": True}
 
@@ -1013,71 +1019,10 @@ class CronometerClient:
 
         Returns {"food_id": int, "total_grams": float, "ingredient_count": int}.
         """
-        if not ingredients:
-            raise ValueError("create_recipe requires at least one ingredient")
-
-        # Normalize to (food_id, grams, measure_id|None) and validate up front so
-        # a malformed entry fails before any network call.
-        parsed: list[tuple[int, float, int | None]] = []
-        for item in ingredients:
-            if len(item) == 2:
-                food_id, grams = item
-                measure_id = None
-            elif len(item) == 3:
-                food_id, grams, measure_id = item
-            else:
-                raise ValueError(
-                    f"Each ingredient must be (food_id, grams) or "
-                    f"(food_id, grams, measure_id); got {item!r}"
-                )
-            if grams <= 0:
-                raise ValueError(
-                    f"Ingredient grams must be positive; food {food_id} got {grams!r}"
-                )
-            parsed.append((int(food_id), float(grams), measure_id))
-
-        total_grams = sum(g for _, g, _ in parsed)
-
-        # One batch call resolves every ingredient's measures, translation, and
-        # per-100g nutrient profile.
-        foods = self.get_foods([fid for fid, _, _ in parsed])
-        food_by_id = {f.get("id"): f for f in foods if isinstance(f, dict)}
-        missing = [fid for fid, _, _ in parsed if fid not in food_by_id]
-        if missing:
-            raise CronometerError(f"Ingredient food IDs not found: {missing}")
-
-        ingredient_rows: list[dict] = []
-        batch_totals: dict[int, float] = {}
-        for food_id, grams, measure_id in parsed:
-            food = food_by_id[food_id]
-            if measure_id is None:
-                measure_id = _gram_measure_id(food)
-            ingredient_rows.append(
-                {
-                    "id": 0,
-                    "foodId": food_id,
-                    "measureId": measure_id,
-                    "translationId": _translation_id(food),
-                    "grams": grams,
-                    "value": grams,
-                }
-            )
-            # Ingredient nutrients are per-100g; accumulate the batch total.
-            for n in food.get("nutrients", []):
-                if not isinstance(n, dict):
-                    continue
-                nid = n.get("id")
-                amount = n.get("amount")
-                if nid is None or not isinstance(amount, (int, float)):
-                    continue
-                batch_totals[nid] = batch_totals.get(nid, 0.0) + amount * grams / 100.0
-
-        # Cronometer stores recipe nutrients per-100g of the finished batch.
-        scale = 100.0 / total_grams
-        nutrients = [
-            {"id": nid, "amount": round(amount * scale, 6)}
-            for nid, amount in sorted(batch_totals.items())
-        ]
+        parsed = _parse_recipe_ingredients(ingredients)
+        ingredient_rows, nutrients, total_grams = self._resolve_recipe_ingredients(
+            parsed
+        )
 
         # The first measure in the array becomes the server-assigned
         # defaultMeasureId, so the serving measure leads.
@@ -1099,7 +1044,7 @@ class CronometerClient:
             },
             {
                 "id": 0,
-                "name": "full recipe",
+                "name": _FULL_RECIPE_MEASURE,
                 "value": total_grams,
                 "amount": 1.0,
                 "type": "Weight",
@@ -1144,6 +1089,255 @@ class CronometerClient:
             "total_grams": total_grams,
             "ingredient_count": len(ingredient_rows),
         }
+
+    # ------------------------------------------------------------------
+    # Recipe edit / retire
+    # ------------------------------------------------------------------
+
+    def _get_recipe(self, food_id: int) -> dict:
+        """Fetch a food and refuse anything that isn't a user-created recipe.
+
+        A recipe is a food with source "Custom" (what get_food reports for
+        everything the user created) and a non-empty `ingredients` array.
+        """
+        food = self.get_food(food_id)
+        if food.get("source") != "Custom":
+            raise CronometerError(
+                f"Food {food_id} ({food.get('name')!r}) is not a user-created "
+                f"recipe (source={food.get('source')!r})"
+            )
+        if not food.get("ingredients"):
+            raise CronometerError(
+                f"Food {food_id} ({food.get('name')!r}) is a plain custom food, "
+                f"not a recipe; use update_custom_food / delete_custom_food"
+            )
+        return food
+
+    def update_recipe(
+        self,
+        food_id: int,
+        *,
+        ingredients: list[tuple] | None = None,
+        name: str | None = None,
+        serving_name: str | None = None,
+        serving_grams: float | None = None,
+        comments: str | None = None,
+    ) -> dict:
+        """Edit a user-created recipe in place, keeping its food id.
+
+        Re-sends the recipe to /api/v2/add_food, which upserts by id (verified
+        live: the food id, measure ids, and anything not passed survive, so
+        diary entries that reference the recipe keep pointing at it). Only the
+        fields passed (not None) change.
+
+        Args:
+            ingredients: The recipe's complete new ingredient list, in
+                create_recipe's (food_id, grams[, measure_id]) form. It
+                replaces the old list wholesale; nutrients and the "full
+                recipe" measure are re-derived from it. The serving measure
+                keeps its weight unless serving_grams is also passed.
+            name: New recipe name.
+            serving_name: New name for the default serving measure. A leading
+                number ("2 bowls") becomes the serving's quantity, as the
+                server does when it creates a measure; it is not re-parsed
+                when an existing measure is re-sent.
+            serving_grams: New total weight of the default serving.
+            comments: New recipe notes ("" clears them).
+
+        Only weight-based recipes (what create_recipe and import_recipe make)
+        are supported: serving-based ones, with "Recipe"-type measures, store
+        nutrients per batch rather than per-100g and are refused.
+
+        Returns {"food_id", "name", "total_grams", "ingredient_count",
+        "serving": {"measure_id", "name", "quantity", "grams"}}.
+        """
+        if all(
+            v is None
+            for v in (ingredients, name, serving_name, serving_grams, comments)
+        ):
+            raise ValueError("update_recipe needs at least one field to change")
+
+        parsed = None if ingredients is None else _parse_recipe_ingredients(ingredients)
+
+        quantity = None
+        if serving_name is not None:
+            if not serving_name.strip():
+                raise ValueError("serving_name must not be empty")
+            led = _QUANTITY_LED_NAME.match(serving_name)
+            if led:
+                quantity = float(led.group(1))
+                serving_name = led.group(2)
+                if not (math.isfinite(quantity) and quantity > 0):
+                    raise ValueError(
+                        f"serving_name quantity must be a positive number, "
+                        f"got {led.group(1)!r}"
+                    )
+        if serving_grams is not None and not (
+            math.isfinite(serving_grams) and serving_grams > 0
+        ):
+            raise ValueError(
+                f"serving_grams must be a positive number, got {serving_grams!r}"
+            )
+        if name is not None and not name.strip():
+            raise ValueError("name must not be empty")
+
+        with self._food_lock(food_id):
+            food = self._get_recipe(food_id)
+
+            measures = food.get("measures") or []
+            serving_based = [m for m in measures if m.get("type") == "Recipe"]
+            if serving_based:
+                raise CronometerError(
+                    f"Recipe {food_id} ({food.get('name')!r}) is serving-based "
+                    f"(measures of type 'Recipe'); only weight-based recipes "
+                    f"can be edited"
+                )
+            serving = next(
+                (m for m in measures if m.get("id") == food.get("defaultMeasureId")),
+                None,
+            )
+            if serving is None:
+                raise CronometerError(
+                    f"Recipe {food_id} has no measure matching its "
+                    f"defaultMeasureId {food.get('defaultMeasureId')!r}: {measures}"
+                )
+
+            if name is not None:
+                old_name = food.get("name")
+                food["name"] = name
+                for t in food.get("translations", []):
+                    if t.get("name") == old_name:
+                        t["name"] = name
+
+            if comments is not None:
+                food["comments"] = comments
+
+            if serving_name is not None or serving_grams is not None:
+                # The fixed measures are kept in sync by the server (or are
+                # units); turning one into the serving would corrupt it.
+                if serving.get("name") in _RECIPE_FIXED_MEASURES:
+                    raise CronometerError(
+                        f"Recipe {food_id}'s default serving is its "
+                        f"{serving.get('name')!r} measure, which can't be "
+                        f"renamed or resized; set a separate serving in the app"
+                    )
+                if serving_name is not None:
+                    serving["name"] = serving_name
+                if serving_grams is not None:
+                    serving["value"] = serving_grams
+                # A recipe serving is "<amount> <name>" weighing `value` grams;
+                # any edit to it makes the quantity explicit (1 unless the
+                # name led with a number), as create_recipe writes it.
+                serving["amount"] = quantity if quantity is not None else 1.0
+
+            if parsed is not None:
+                rows, nutrients, total_grams = self._resolve_recipe_ingredients(parsed)
+                food["ingredients"] = rows
+                food["nutrients"] = nutrients
+                for m in measures:
+                    if m.get("name") == _FULL_RECIPE_MEASURE:
+                        m["value"] = total_grams
+            else:
+                total_grams = sum(i["grams"] for i in food["ingredients"])
+
+            self._save_food(food)
+
+        logger.info(
+            "Updated recipe %r (id=%d, %d ingredients, %.1fg batch)",
+            food["name"],
+            food_id,
+            len(food["ingredients"]),
+            total_grams,
+        )
+        return {
+            "food_id": food_id,
+            "name": food["name"],
+            "total_grams": total_grams,
+            "ingredient_count": len(food["ingredients"]),
+            "serving": {
+                "measure_id": serving["id"],
+                "name": serving["name"],
+                "quantity": serving["amount"],
+                "grams": serving["value"],
+            },
+        }
+
+    def retire_recipe(self, food_id: int) -> dict:
+        """Retire (soft-delete) a user-created recipe.
+
+        The same mechanism as retire_custom_food: the recipe drops out of
+        search and the Custom Foods list but stays readable by id, and diary
+        entries that use it are kept. No hard-delete endpoint is known (none of
+        the plausible v2/v3 names exist on the mobile API), so this is the
+        closest available. Idempotent.
+
+        Returns {"food_id": int, "name": str, "retired": True}.
+        """
+        with self._food_lock(food_id):
+            food = self._get_recipe(food_id)
+            food["retired"] = True
+            self._save_food(food)
+        logger.info("Retired recipe %r (id=%d)", food.get("name"), food_id)
+        return {"food_id": food_id, "name": food.get("name"), "retired": True}
+
+    def _resolve_recipe_ingredients(
+        self, parsed: list[tuple[int, float, int | None]]
+    ) -> tuple[list[dict], list[dict], float]:
+        """Build ingredient rows and the batch's per-100g nutrient profile.
+
+        One batch get_foods call resolves every ingredient's measures,
+        translation, and per-100g nutrients. Rows carry id 0: on save the
+        server replaces a recipe's whole ingredient list with what is sent and
+        assigns fresh row ids (verified live), so existing row ids need not be
+        matched up.
+
+        The server also recomputes a recipe's nutrients from its ingredients
+        on every save (verified live: a re-sent recipe with a deliberately
+        wrong energy value read back with the derived one). The client-side
+        aggregate is still sent so the payload is self-consistent.
+
+        Returns (ingredient_rows, nutrients, total_grams).
+        """
+        foods = self.get_foods([fid for fid, _, _ in parsed])
+        food_by_id = {f.get("id"): f for f in foods if isinstance(f, dict)}
+        missing = [fid for fid, _, _ in parsed if fid not in food_by_id]
+        if missing:
+            raise CronometerError(f"Ingredient food IDs not found: {missing}")
+
+        total_grams = sum(g for _, g, _ in parsed)
+        ingredient_rows: list[dict] = []
+        batch_totals: dict[int, float] = {}
+        for food_id, grams, measure_id in parsed:
+            food = food_by_id[food_id]
+            if measure_id is None:
+                measure_id = _gram_measure_id(food)
+            ingredient_rows.append(
+                {
+                    "id": 0,
+                    "foodId": food_id,
+                    "measureId": measure_id,
+                    "translationId": _translation_id(food),
+                    "grams": grams,
+                    "value": grams,
+                }
+            )
+            # Ingredient nutrients are per-100g; accumulate the batch total.
+            for n in food.get("nutrients", []):
+                if not isinstance(n, dict):
+                    continue
+                nid = n.get("id")
+                amount = n.get("amount")
+                if nid is None or not isinstance(amount, (int, float)):
+                    continue
+                batch_totals[nid] = batch_totals.get(nid, 0.0) + amount * grams / 100.0
+
+        # Cronometer stores recipe nutrients per-100g of the finished batch.
+        scale = 100.0 / total_grams
+        nutrients = [
+            {"id": nid, "amount": round(amount * scale, 6)}
+            for nid, amount in sorted(batch_totals.items())
+        ]
+        return ingredient_rows, nutrients, total_grams
 
     # ------------------------------------------------------------------
     # Recipe import (free-text ingredients)
@@ -1930,6 +2124,36 @@ class CronometerClient:
 # ======================================================================
 # Helpers
 # ======================================================================
+
+
+def _parse_recipe_ingredients(
+    ingredients: list[tuple],
+) -> list[tuple[int, float, int | None]]:
+    """Normalize recipe ingredients to (food_id, grams, measure_id | None).
+
+    Validates up front so a malformed entry fails before any network call.
+    """
+    if not ingredients:
+        raise ValueError("A recipe needs at least one ingredient")
+
+    parsed: list[tuple[int, float, int | None]] = []
+    for item in ingredients:
+        if len(item) == 2:
+            food_id, grams = item
+            measure_id = None
+        elif len(item) == 3:
+            food_id, grams, measure_id = item
+        else:
+            raise ValueError(
+                f"Each ingredient must be (food_id, grams) or "
+                f"(food_id, grams, measure_id); got {item!r}"
+            )
+        if not (math.isfinite(grams) and grams > 0):
+            raise ValueError(
+                f"Ingredient grams must be positive; food {food_id} got {grams!r}"
+            )
+        parsed.append((int(food_id), float(grams), measure_id))
+    return parsed
 
 
 def _gram_measure_id(food: dict) -> int:

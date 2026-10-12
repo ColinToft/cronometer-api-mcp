@@ -739,7 +739,9 @@ def get_food_details(food_id: int) -> str:
     """Get detailed food information including nutrition and serving sizes.
 
     Use this after search_foods to get the full nutrient profile and
-    available measure_ids needed for add_food_entry.
+    available measure_ids needed for add_food_entry. For a recipe it also
+    returns its ingredients (in update_recipe's input shape) and comments; a
+    deleted (retired) food is flagged with "retired": true.
 
     Args:
         food_id: Food ID from search_foods results.
@@ -761,15 +763,28 @@ def get_food_details(food_id: int) -> str:
                 }
             )
 
-        return _ok(
-            {
-                "food_id": data.get("id"),
-                "name": data.get("name"),
-                "default_measure_id": data.get("defaultMeasureId"),
-                "measures": measures,
-                "nutrients": data.get("nutrients", []),
-            }
-        )
+        details = {
+            "food_id": data.get("id"),
+            "name": data.get("name"),
+            "default_measure_id": data.get("defaultMeasureId"),
+            "measures": measures,
+            "nutrients": data.get("nutrients", []),
+        }
+        # Recipes: the ingredient list in update_recipe's input shape, so it
+        # can be edited and sent back.
+        if data.get("ingredients"):
+            details["ingredients"] = [
+                {
+                    "food_id": i["foodId"],
+                    "grams": i["grams"],
+                    "measure_id": i["measureId"],
+                }
+                for i in data["ingredients"]
+            ]
+            details["comments"] = data.get("comments")
+        if data.get("retired"):
+            details["retired"] = True
+        return _ok(details)
     except Exception as e:
         return _err(e)
 
@@ -961,6 +976,33 @@ def delete_custom_food(food_id: int) -> str:
 # Recipe creation
 # ------------------------------------------------------------------
 
+_INGREDIENT_KEYS = frozenset({"food_id", "grams", "measure_id"})
+
+
+def _parse_ingredient_dicts(ingredients: list[dict]) -> list[tuple]:
+    """Turn the tools' ingredient dicts into the client's tuples.
+
+    Unknown keys are rejected rather than ignored, so a typo ("gram") can't
+    silently drop an override.
+    """
+    parsed = []
+    for item in ingredients:
+        if "food_id" not in item or "grams" not in item:
+            raise ValueError(
+                f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
+            )
+        unknown = set(item) - _INGREDIENT_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown ingredient keys {sorted(unknown)} in {item!r}; "
+                f"expected food_id, grams, and optionally measure_id"
+            )
+        if item.get("measure_id") is not None:
+            parsed.append((item["food_id"], item["grams"], item["measure_id"]))
+        else:
+            parsed.append((item["food_id"], item["grams"]))
+    return parsed
+
 
 @mcp.tool(annotations=_WRITE)
 def add_recipe(
@@ -990,19 +1032,7 @@ def add_recipe(
         comments: Free-text recipe notes.
     """
     try:
-        parsed = []
-        for item in ingredients:
-            if "food_id" not in item or "grams" not in item:
-                return _err(
-                    ValueError(
-                        f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
-                    )
-                )
-            if item.get("measure_id") is not None:
-                parsed.append((item["food_id"], item["grams"], item["measure_id"]))
-            else:
-                parsed.append((item["food_id"], item["grams"]))
-
+        parsed = _parse_ingredient_dicts(ingredients)
         client = _get_client()
         result = client.create_recipe(
             name,
@@ -1022,6 +1052,81 @@ def add_recipe(
                 "total_grams": result["total_grams"],
                 "ingredient_count": result["ingredient_count"],
                 "note": "Use food_id and measure_id with add_food_entry to log this recipe.",
+            }
+        )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def update_recipe(
+    food_id: int,
+    ingredients: list[dict] | None = None,
+    name: str | None = None,
+    serving_name: str | None = None,
+    serving_grams: float | None = None,
+    comments: str | None = None,
+) -> str:
+    """Edit an existing recipe (one you created) in place.
+
+    The recipe keeps its food_id, so diary entries that already use it pick
+    up the changes. Only the arguments you pass change. Cronometer re-derives
+    the nutrients and the "full recipe" weight from the ingredients. Check
+    the result with get_food_details. Plain custom foods go through
+    update_custom_food instead.
+
+    Args:
+        food_id: ID of the recipe to edit.
+        ingredients: The complete new ingredient list, in add_recipe's
+            [{"food_id": int, "grams": float, "measure_id"?: int}] form. It
+            replaces the old list entirely: to change one ingredient, read the
+            current list with get_food_details and send it all back with that
+            change. The serving keeps its weight unless you also pass
+            serving_grams, so a bigger batch means more servings, not bigger
+            ones.
+        name: New recipe name.
+        serving_name: New name for the default serving, e.g.
+            "serving (1/6 batch)". A leading number ("2 bowls") becomes the
+            serving's quantity.
+        serving_grams: New weight of the default serving in grams.
+        comments: New recipe notes ("" clears them).
+    """
+    try:
+        parsed = None if ingredients is None else _parse_ingredient_dicts(ingredients)
+        client = _get_client()
+        result = client.update_recipe(
+            food_id,
+            ingredients=parsed,
+            name=name,
+            serving_name=serving_name,
+            serving_grams=serving_grams,
+            comments=comments,
+        )
+        return _ok(result)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def delete_recipe(food_id: int) -> str:
+    """Delete a recipe (one you created) by retiring it.
+
+    Sets the same `retired` flag delete_custom_food uses (the API has no hard
+    delete): the recipe drops out of search after a few seconds, diary entries
+    that already use it are kept, and get_food_details can still read it by
+    ID. Plain custom foods go through delete_custom_food instead.
+
+    Args:
+        food_id: ID of the recipe to delete.
+    """
+    try:
+        client = _get_client()
+        result = client.retire_recipe(food_id)
+        return _ok(
+            {
+                "food_id": result["food_id"],
+                "name": result["name"],
+                "retired": True,
             }
         )
     except Exception as e:
