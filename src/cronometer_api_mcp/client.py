@@ -663,14 +663,17 @@ class CronometerClient:
         sodium_mg: float = 0,
         saturated_fat_g: float = 0,
         extra_nutrients: dict[int, float] | None = None,
-        serving_name: str = "1 serving",
+        serving_name: str = "serving",
         serving_grams: float = 100.0,
+        serving_quantity: float = 1,
     ) -> dict:
         """Create a custom food in Cronometer.
 
         Nutrient amounts are per the full serving (serving_grams).
         They are normalized to per-100g internally, since Cronometer stores
-        all nutrient data on a per-100g basis.
+        all nutrient data on a per-100g basis. The serving is
+        serving_quantity units of serving_name; a name that leads with a
+        quantity ("2 cookies") is refused.
 
         Args:
             extra_nutrients: Additional nutrients beyond the core macros above
@@ -685,6 +688,8 @@ class CronometerClient:
 
         Returns {"food_id": int, "measure_id": int | None}.
         """
+        serving_name = _serving_name(serving_name)
+        _check_positive("serving_quantity", serving_quantity)
         # Cronometer stores nutrients per 100g -- normalize from per-serving.
         scale = 100.0 / serving_grams if serving_grams > 0 else 1.0
 
@@ -739,7 +744,7 @@ class CronometerClient:
                         "id": 0,
                         "name": serving_name,
                         "value": serving_grams,
-                        "amount": 1.0,
+                        "amount": serving_quantity,
                         "type": "Atomic",
                     }
                 ],

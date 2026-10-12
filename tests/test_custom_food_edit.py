@@ -280,12 +280,12 @@ def test_update_custom_food_rejects_blank_serving_name(tmp_path, serving_name):
     "serving_name", ["cookie (2 per pack)", "serving #2", "half (½) cup"]
 )
 def test_update_custom_food_keeps_inner_numbers(tmp_path, serving_name):
-    client, state = make_cold_client(tmp_path, [custom_food(), OK])
+    client, state = make_cold_client(tmp_path, [weight_default_food(), OK])
 
     client.update_custom_food(FOOD_ID, serving_name=f"  {serving_name} ")
 
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["name"], measure["amount"]) == (serving_name, 1)
+    assert (measure["name"], measure["amount"]) == (serving_name, 400)
 
 
 def test_update_custom_food_serving_name_alone_keeps_quantity(tmp_path):

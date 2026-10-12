@@ -1202,3 +1202,45 @@ LEADING_QUANTITY_NAMES = [
     "⅟2 cup",
     "↉",
 ]
+
+
+def _create(client, **kwargs):
+    return client.create_custom_food(
+        "Test Food", calories=200, protein_g=10, fat_g=5, carbs_g=20, **kwargs
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "name", "amount"),
+    [
+        ({}, "serving", 1),
+        ({"serving_name": " cookies ", "serving_quantity": 2}, "cookies", 2),
+    ],
+)
+def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
+    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+
+    _create(client, serving_grams=30, **kwargs)
+
+    (measure,) = state["payloads"][0]["data"]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"]) == (name, amount, 30)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"serving_name": n}, "pass the number as serving_quantity")
+        for n in LEADING_QUANTITY_NAMES
+    ]
+    + [({"serving_name": n}, "serving_name must not be empty") for n in ("", "  ")]
+    + [
+        ({"serving_quantity": q}, "serving_quantity")
+        for q in (0, -1, float("nan"), float("inf"))
+    ],
+)
+def test_create_custom_food_rejects_bad_serving(tmp_path, kwargs, match):
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match=match):
+        _create(client, **kwargs)
+    assert state["payloads"] == []
