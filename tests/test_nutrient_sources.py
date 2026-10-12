@@ -478,3 +478,93 @@ def test_tool_schema():
     assert props["top_n"]["default"] == 10
     assert (props["days"]["minimum"], props["days"]["maximum"]) == (1, 31)
     assert tool.annotations.read_only_hint is True
+
+
+# Observed live for an empty date (2027-03-01): every key present, diary [].
+EMPTY_DAY_RESPONSE = {
+    "summary": {"consumed": {"total": 0}, "macros": {"energy": 2800}},
+    "template": {"name": "Default Macronutrient Targets", "energy": 2800},
+    "diary": [],
+    "messages": [],
+    "info": {"complete": False, "day": "2027-03-01"},
+}
+
+
+def test_observed_empty_day_shape_contributes_nothing(client):
+    client.get_diary.side_effect = None
+    client.get_diary.return_value = EMPTY_DAY_RESPONSE
+
+    sodium = _only(_call(nutrients="sodium", date="2027-03-01"))
+
+    assert sodium["total"] == 0
+    assert sodium["sources"] == []
+    assert sodium["by_diary_group"] == {}
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {k: v for k, v in EMPTY_DAY_RESPONSE.items() if k != "diary"},
+        {**EMPTY_DAY_RESPONSE, "diary": None},
+        {**EMPTY_DAY_RESPONSE, "diary": {}},
+        [],
+    ],
+)
+def test_unknown_diary_shape_fails(client, response):
+    client.get_diary.side_effect = None
+    client.get_diary.return_value = response
+
+    result = _call(nutrients="sodium")
+
+    assert result["status"] == "error"
+    assert "Unexpected get_diary response without a diary list" in result["message"]
+
+
+# ---------------------------------------------------------------------------
+# add_food_entry shares the diary-group names
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "group,expected",
+    [
+        ("auto", 0),
+        ("breakfast", 1),
+        ("Lunch", 2),
+        (" DINNER ", 3),
+        ("snacks", 4),
+    ],
+)
+def test_add_food_entry_diary_groups(client, group, expected):
+    client.add_serving.return_value = {"id": 1}
+
+    result = json.loads(
+        server.add_food_entry(
+            food_id=1, measure_id=2, grams=3, date="2026-10-14", diary_group=group
+        )
+    )
+
+    assert result["status"] == "success"
+    assert client.add_serving.call_args.kwargs["diary_group"] == expected
+
+
+@pytest.mark.parametrize("group", ["brunch", "", "1"])
+def test_add_food_entry_rejects_unknown_group(client, group):
+    result = json.loads(
+        server.add_food_entry(food_id=1, measure_id=2, grams=3, diary_group=group)
+    )
+
+    assert result["status"] == "error"
+    assert (
+        "Must be one of: auto, breakfast, lunch, dinner, snacks." in result["message"]
+    )
+    client.add_serving.assert_not_called()
+
+
+def test_diary_group_maps_are_inverse():
+    assert server._DIARY_GROUP_NAMES == {
+        1: "breakfast",
+        2: "lunch",
+        3: "dinner",
+        4: "snacks",
+    }

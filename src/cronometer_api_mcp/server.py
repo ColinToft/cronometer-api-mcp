@@ -75,6 +75,10 @@ mcp = MCPServer(
     version=_server_version(),
 )
 
+# Cronometer's default diary groups. An entry's group is its order >> 16.
+_DIARY_GROUPS = {"breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
+_DIARY_GROUP_NAMES = {number: name for name, number in _DIARY_GROUPS.items()}
+
 _client: CronometerClient | None = None
 # Guards the lazy construction below. SDK 2.x dispatches sync tool handlers on
 # worker threads, so concurrent first-calls would otherwise build a client each,
@@ -230,13 +234,8 @@ def get_food_log(
         return _err(e)
 
 
-def _enriched_diary(client: CronometerClient, day: date) -> dict:
-    """Fetch a day's diary with each Serving enriched (name, nutrients, ...)."""
-    return client.enrich_diary_servings(client.get_diary(day))
-
-
 def _food_log_for_day(client: CronometerClient, day: date) -> dict:
-    data = _enriched_diary(client, day)
+    data = client.enrich_diary_servings(client.get_diary(day))
 
     summary = (data or {}).get("summary") or {}
     target = (summary.get("macros") or {}).get("energy")
@@ -314,7 +313,9 @@ def get_nutrient_sources(
         client = _get_client()
         defs = client.get_nutrient_definitions()
         nutrient_ids = _match_nutrients(nutrients, defs)
-        diaries = [_enriched_diary(client, day) for day in resolved_days]
+        diaries = [
+            client.enrich_diary_servings(client.get_diary(day)) for day in resolved_days
+        ]
         dates = (
             {"date": resolved_days[0].isoformat()}
             if len(resolved_days) == 1
@@ -327,9 +328,6 @@ def get_nutrient_sources(
         return _ok({**dates, "nutrients": ranking})
     except Exception as e:
         return _err(e)
-
-
-_DIARY_GROUP_NAMES = {1: "breakfast", 2: "lunch", 3: "dinner", 4: "snacks"}
 
 
 def _match_nutrients(queries: list[str], defs: dict[int, dict]) -> list[int]:
@@ -371,6 +369,13 @@ def _rank_sources(
     and leaves an entry bare when its food can't be fetched), since the totals
     would silently undercount.
     """
+    for diary in diaries:
+        # An empty day comes back as "diary": [], never a missing key.
+        if not (isinstance(diary, dict) and isinstance(diary.get("diary"), list)):
+            shape = sorted(diary) if isinstance(diary, dict) else type(diary).__name__
+            raise TypeError(
+                f"Unexpected get_diary response without a diary list: {shape}"
+            )
     servings = [
         e for diary in diaries for e in diary["diary"] if e["type"] == "Serving"
     ]
@@ -487,13 +492,7 @@ def add_food_entry(
                      "dinner", "snacks" (case-insensitive, default "auto").
     """
     try:
-        group_map = {
-            "auto": 0,
-            "breakfast": 1,
-            "lunch": 2,
-            "dinner": 3,
-            "snacks": 4,
-        }
+        group_map = {"auto": 0, **_DIARY_GROUPS}
         group_key = diary_group.strip().lower()
         group_int = group_map.get(group_key)
         if group_int is None:
