@@ -137,6 +137,10 @@ class CronometerError(Exception):
     """Raised when a Cronometer API call fails."""
 
 
+class RecipeNotDerivedError(CronometerError):
+    """A recipe saved, but the server returned no derived nutrients for it."""
+
+
 def _totp_code(secret: str, for_time: float | None = None) -> str:
     """Current RFC 6238 TOTP code (SHA-1, 30 s period, 6 digits) for `secret`.
 
@@ -807,6 +811,11 @@ class CronometerClient:
             )
         if food.get("retired") and not allow_retired:
             raise CronometerError(f"{label} has been deleted (retired)")
+        if any(m.get("type") == "Recipe" for m in food.get("measures") or []):
+            raise CronometerError(
+                f"{label} is a serving-based recipe (measures of type 'Recipe'); "
+                f"only weight-based recipes are supported"
+            )
         is_recipe = bool(food.get("ingredients"))
         if recipe is True and not is_recipe:
             raise CronometerError(
@@ -1114,6 +1123,13 @@ class CronometerClient:
                     food, measure_id, serving_name, serving_quantity, serving_grams
                 )
             total_grams = _full_recipe_grams(food)
+        except RecipeNotDerivedError as e:
+            raise RecipeNotDerivedError(
+                f"Recipe {food_id} ({name!r}) was created, but the server "
+                f"returned no derived nutrients for it. The recipe exists; check "
+                f"its ingredients in the Cronometer app rather than creating it "
+                f"again."
+            ) from e
         except Exception as e:
             raise CronometerError(
                 f"Recipe {food_id} ({name!r}) was created, but checking it "
@@ -1267,14 +1283,8 @@ class CronometerClient:
 
         with self._food_lock(food_id):
             food = self._get_user_food(food_id, recipe=True)
-
-            if any(m.get("type") == "Recipe" for m in food.get("measures") or []):
-                raise CronometerError(
-                    f"Recipe {food_id} ({food.get('name')!r}) is serving-based "
-                    f"(measures of type 'Recipe'); only weight-based recipes "
-                    f"can be edited"
-                )
             serving = self._recipe_serving(food)
+            servings_before = _full_recipe_grams(food) / serving["value"]
 
             self._rename(food, name)
             if comments is not None:
@@ -1313,6 +1323,12 @@ class CronometerClient:
             "name": food["name"],
             "total_grams": total_grams,
             "ingredient_count": len(food["ingredients"]),
+            # A "serving (1/N batch)" stays a fraction only if serving_grams is
+            # recomputed when the batch changes; these show whether it was.
+            "servings_per_batch": {
+                "before": round(servings_before, 3),
+                "after": round(total_grams / serving["value"], 3),
+            },
             "serving": {
                 "measure_id": serving["id"],
                 "name": serving["name"],
@@ -2167,8 +2183,12 @@ def _parse_recipe_ingredients(
     return parsed
 
 
+def _measure_key(name: str) -> str:
+    return name.strip().casefold()
+
+
 def _is_fixed_recipe_measure(name: str) -> bool:
-    return name.strip().casefold() in _RECIPE_FIXED_MEASURES
+    return _measure_key(name) in _RECIPE_FIXED_MEASURES
 
 
 def _recipe_serving_name(name: str) -> str:
@@ -2216,23 +2236,30 @@ def _check_serving_fits(serving_grams: float, batch_grams: float) -> None:
 
 
 def _check_derived_nutrients(food: dict) -> None:
-    """The client sends no nutrients, so the server must have derived them."""
-    if sum(i["grams"] for i in food.get("ingredients") or []) <= 0:
-        return
+    """The client sends no nutrients, so the server must have derived them.
+
+    Derived means energy is present: a water-only recipe reads back with
+    energy 0 (and every other nutrient 0), verified live.
+    """
     energy = next(
-        (n["amount"] for n in food.get("nutrients") or [] if n["id"] == 208), None
+        (
+            n["amount"]
+            for n in food.get("nutrients") or []
+            if n["id"] == NUTRIENT_IDS["energy"]
+        ),
+        None,
     )
-    if energy is None or energy <= 0:
-        raise CronometerError(
-            f"Recipe {food['id']} was saved, but has no derived nutrients "
-            f"(energy {energy!r}); check its ingredients in Cronometer"
+    if energy is None:
+        raise RecipeNotDerivedError(
+            f"Recipe {food['id']} was saved, but the server returned no derived "
+            f"nutrients for it"
         )
 
 
 def _full_recipe_grams(food: dict) -> float:
     """The batch weight the server derived, from the "full recipe" measure."""
     for m in food.get("measures") or []:
-        if m.get("name", "").strip().casefold() == _FULL_RECIPE_MEASURE:
+        if _measure_key(m.get("name", "")) == _FULL_RECIPE_MEASURE:
             return m["value"]
     raise CronometerError(
         f"Recipe {food.get('id')} has no 'full recipe' measure: {food.get('measures')}"

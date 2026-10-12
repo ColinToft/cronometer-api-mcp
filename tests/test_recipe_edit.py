@@ -13,7 +13,7 @@ import pytest
 from test_client import FakeFoodServer, make_server_client, server_reparse
 
 from cronometer_api_mcp import server
-from cronometer_api_mcp.client import CronometerError
+from cronometer_api_mcp.client import CronometerError, RecipeNotDerivedError
 
 RECIPE_ID = 85008439
 OK = {"result": "SUCCESS", "messages": [], "id": RECIPE_ID}
@@ -39,6 +39,14 @@ EGG = {
     ],
     "translations": [{"translationId": 1893, "name": "Egg, whole"}],
     "nutrients": [{"id": 208, "amount": 143.0}, {"id": 203, "amount": 12.6}],
+}
+# Live: a water-only recipe reads back with energy 0, not without it.
+WATER = {
+    "id": 455493,
+    "name": "Tap Water",
+    "defaultMeasureId": 1,
+    "measures": [{"id": 1, "name": "g", "value": 1, "amount": 1, "type": "Weight"}],
+    "nutrients": [{"id": 208, "amount": 0}, {"id": 307, "amount": 0}],
 }
 PB = {
     "id": 619,
@@ -149,7 +157,7 @@ def recipe(**overrides) -> dict:
 def recipe_client(tmp_path, food=None, *, save_responses=(), server_cls=FakeFoodServer):
     srv = server_cls(
         foods=[recipe() if food is None else food],
-        ingredient_foods=[BANANA, EGG, PB],
+        ingredient_foods=[BANANA, EGG, PB, WATER],
         save_responses=save_responses,
     )
     return make_server_client(tmp_path, srv)
@@ -202,6 +210,7 @@ def test_rename_resends_recipe_unchanged_apart_from_name(tmp_path):
         "name": "Renamed",
         "total_grams": 152,
         "ingredient_count": 2,
+        "servings_per_batch": {"before": 2.0, "after": 2.0},
         "serving": {
             "measure_id": 313167825,
             "name": "serving (1/2 batch)",
@@ -673,13 +682,18 @@ def test_refuses_retired_recipes(tmp_path):
     assert endpoints(state) == ["get_food"]
 
 
-def test_refuses_serving_based_recipes(tmp_path):
+@pytest.mark.parametrize("action", ["update", "retire"])
+def test_refuses_serving_based_recipes(tmp_path, action):
+    """Serving-based recipes store nutrients per batch; no path re-sends them."""
     food = recipe()
     food["measures"][1]["type"] = "Recipe"
     client, state = recipe_client(tmp_path, food)
 
     with pytest.raises(CronometerError, match="serving-based"):
-        client.update_recipe(RECIPE_ID, name="X")
+        if action == "update":
+            client.update_recipe(RECIPE_ID, name="X")
+        else:
+            client.retire_custom_food(RECIPE_ID)
 
     assert endpoints(state) == ["get_food"]
 
@@ -1155,16 +1169,39 @@ def test_names_without_a_leading_quantity_are_accepted(tmp_path, serving_name):
 
 
 def test_create_recipe_raises_when_no_nutrients_were_derived(tmp_path):
+    """The recipe exists, and update_recipe can't fix derivation, so the
+    advice is to check the ingredients in the app."""
     srv = FakeFoodServer(ingredient_foods=[EGG], derive_nutrients=False)
     client, state = make_server_client(tmp_path, srv)
 
-    with pytest.raises(
-        CronometerError, match=r"Recipe 4242 was saved, but has no derived nutrients"
-    ) as err:
+    with pytest.raises(RecipeNotDerivedError) as err:
         client.create_recipe("R", ingredients=[(1234, 100)])
 
-    assert "update_recipe(4242" in str(err.value)
+    msg = str(err.value)
+    assert "Recipe 4242 ('R') was created" in msg
+    assert "returned no derived nutrients" in msg
+    assert "check its ingredients in the Cronometer app" in msg
+    assert "update_recipe" not in msg
     assert state["endpoints"].count("add_food") == 1
+    assert list(srv.foods) == [4242]  # exactly one recipe created
+
+
+def test_create_recipe_post_create_failure_names_the_one_recipe(tmp_path):
+    """Any other failure after the save points at update_recipe for that id."""
+    srv = StubbornServer(ingredient_foods=[EGG])
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError) as err:
+        client.create_recipe(
+            "R", ingredients=[(1234, 100)], serving_name="serving (1/2 batch)"
+        )
+
+    msg = str(err.value)
+    assert "Recipe 4242 ('R') was created" in msg
+    assert "update_recipe(4242, ...) rather than creating it again" in msg
+    assert not isinstance(err.value, RecipeNotDerivedError)
+    assert list(srv.foods) == [4242]  # the re-send edited it, nothing new
+    assert state["endpoints"].count("add_food") == 2
 
 
 def test_update_recipe_raises_when_no_nutrients_were_derived(tmp_path):
@@ -1174,9 +1211,40 @@ def test_update_recipe_raises_when_no_nutrients_were_derived(tmp_path):
     client, _ = make_server_client(tmp_path, srv)
 
     with pytest.raises(
-        CronometerError, match=rf"Recipe {RECIPE_ID} was saved, but has no derived"
+        RecipeNotDerivedError,
+        match=rf"Recipe {RECIPE_ID} was saved, but the server returned no derived",
     ):
         client.update_recipe(RECIPE_ID, name="X")
+
+
+def test_zero_calorie_recipe_create_passes(tmp_path):
+    srv = FakeFoodServer(ingredient_foods=[WATER])
+    client, _ = make_server_client(tmp_path, srv)
+
+    result = client.create_recipe("Water", ingredients=[(455493, 500)])
+
+    energy = {n["id"]: n["amount"] for n in srv.foods[result["food_id"]]["nutrients"]}
+    assert energy[208] == 0
+
+
+def test_zero_calorie_recipe_update_passes(tmp_path):
+    client, _ = recipe_client(tmp_path)
+
+    result = client.update_recipe(RECIPE_ID, ingredients=[(455493, 500)])
+
+    assert result["total_grams"] == 500
+
+
+def test_servings_per_batch_shows_a_drifted_fraction(tmp_path):
+    """A "1/2 batch" serving (76 of 152 g) is a third of a 228 g batch unless
+    serving_grams is recomputed."""
+    client, _ = recipe_client(tmp_path)
+
+    drifted = client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)])
+    assert drifted["servings_per_batch"] == {"before": 2.0, "after": 3.0}
+
+    kept = client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)], serving_grams=114)
+    assert kept["servings_per_batch"] == {"before": 3.0, "after": 2.0}
 
 
 def test_derived_energy_is_checked_on_every_save(tmp_path):

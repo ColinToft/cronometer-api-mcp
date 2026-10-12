@@ -1075,8 +1075,11 @@ def update_recipe(
             replaces the old list entirely: to change one ingredient, read the
             current list with get_food_details and send it all back with that
             change. The serving keeps its weight unless you also pass
-            serving_grams, so a bigger batch means more servings, not bigger
-            ones.
+            serving_grams. So a fraction-of-batch serving such as
+            "serving (1/6 batch)" stops being 1/6 when the batch weight
+            changes: pass serving_grams = new batch grams / 6 with the new
+            ingredients. The result's servings_per_batch (before/after)
+            shows whether the fraction held.
         name: New recipe name.
         serving_name: New name for the recipe's serving, stored exactly as
             given, e.g. "serving (1/6 batch)". Its quantity and weight are
