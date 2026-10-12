@@ -1,22 +1,6 @@
-"""update_recipe / retire_recipe, and the update_recipe / delete_recipe tools.
+"""update_recipe / retire_recipe and the update_recipe / delete_recipe tools.
 
-Like custom foods, recipes are edited by re-sending the get_food object to
-/api/v2/add_food, which upserts by id. Verified against the live API on
-throwaway recipes:
-
-- the food id, measure ids, and untouched fields survive a re-send;
-- a re-sent `ingredients` list replaces the old one wholesale (rows sent with
-  id 0 get fresh row ids, rows left out are dropped);
-- the server re-derives the nutrients and the "full recipe" weight from the
-  ingredients on every save (a deliberately wrong energy value read back as
-  the derived one);
-- an existing measure's name is stored verbatim, while a *new* measure named
-  "serving (1/2 batch)" was stored as amount 0.5, name "batch)";
-- retiring hides the recipe from find_food (after a few seconds of index lag)
-  but get_food still reads it.
-
-No hard-delete endpoint exists among the plausible v2/v3 names, so delete is
-a retire, as for custom foods.
+Fixtures mirror get_food bodies captured from throwaway recipes on the live API.
 """
 
 from __future__ import annotations
@@ -34,7 +18,6 @@ from cronometer_api_mcp.client import CronometerError
 RECIPE_ID = 85008439
 OK = {"result": "SUCCESS", "messages": [], "id": RECIPE_ID}
 
-# Ingredient foods as get_foods returns them (per-100g nutrients).
 BANANA = {
     "id": 450856,
     "name": "Banana, Fresh",
@@ -61,11 +44,9 @@ PB = {
     "id": 619,
     "name": "Peanut Butter",
     "defaultMeasureId": 1960,
-    # No gram measure: the ingredient falls back to the default measure.
     "measures": [
         {"id": 1960, "name": "tbsp", "value": 16, "amount": 1, "type": "Atomic"}
     ],
-    # No translations: translationId falls back to 0.
     "nutrients": [{"id": 208, "amount": 588.0}, {"id": 204, "amount": 50.0}],
 }
 
@@ -75,8 +56,7 @@ def foods_response(*foods: dict) -> dict:
 
 
 def recipe(**overrides) -> dict:
-    """A get_food body shaped like the live one for a create_recipe recipe:
-    banana 120 g + peanut butter 32 g, serving 76 g, batch 152 g."""
+    """Banana 120 g + peanut butter 32 g; serving 76 g, batch 152 g."""
     food = {
         "id": RECIPE_ID,
         "owner": 42,
@@ -160,7 +140,6 @@ def recipe(**overrides) -> dict:
             {"id": 204, "amount": 10.53, "type": "PRIMARY"},
             {"id": 512, "amount": 0.158, "type": "PRIMARY"},
         ],
-        # Server-side sync events that ride along on get_food; not food data.
         "messages": [{"id": 1, "type": "FOOD_CHANGED", "text": "{}"}],
     }
     food.update(overrides)
@@ -168,15 +147,12 @@ def recipe(**overrides) -> dict:
 
 
 def saved(state) -> dict:
-    """The food object sent to add_food (always the last request)."""
     payload = state["payloads"][-1]
     assert payload["config"] == {"call_version": 1}
     return payload["data"]
 
 
 def endpoints(state) -> list[str]:
-    # make_cold_client records payloads only; get_food sends "id", get_foods
-    # "ids", add_food "data".
     out = []
     for p in state["payloads"]:
         if "data" in p:
@@ -202,9 +178,6 @@ def without(food: dict, *keys: str) -> dict:
 
 
 def test_rename_resends_recipe_unchanged_apart_from_name(tmp_path):
-    """A name-only edit re-sends the fetched recipe with its id; only the name
-    and its matching translation change, the sync messages are stripped, and
-    no ingredient lookup happens."""
     client, state = make_cold_client(tmp_path, [recipe(), OK])
 
     result = client.update_recipe(RECIPE_ID, name="Renamed")
@@ -293,10 +266,7 @@ def test_serving_grams_resizes_default_measure_only(tmp_path):
 
 
 def test_serving_name_is_sent_verbatim_and_resets_quantity(tmp_path):
-    """The server parsed a *new* measure named "serving (1/2 batch)" into
-    amount 0.5 / name "batch)". Re-sending the existing measure stores the
-    name verbatim (verified live), so this is also how such a recipe gets
-    repaired: the quantity goes back to 1."""
+    """Repairs a measure the server mangled on create ("batch)", amount 0.5)."""
     mangled = recipe()
     serving = measures_by_id(mangled)[313167825]
     serving.update(name="batch)", amount=0.5)
@@ -341,8 +311,6 @@ def test_serving_name_and_grams_together(tmp_path):
 
 @pytest.mark.parametrize("fixed", ["full recipe", "g", "oz"])
 def test_serving_edit_refused_when_default_is_a_fixed_measure(tmp_path, fixed):
-    """Renaming or resizing the "g"/"oz"/"full recipe" measure would corrupt
-    it (the server keeps "full recipe" equal to the batch weight)."""
     mid = next(m["id"] for m in recipe()["measures"] if m["name"] == fixed)
     client, state = make_cold_client(tmp_path, [recipe(defaultMeasureId=mid), OK])
 
@@ -375,10 +343,6 @@ def test_missing_default_measure_raises(tmp_path):
 
 
 def test_ingredients_replace_list_and_rederive_nutrients(tmp_path):
-    """The new list replaces the old one with id-0 rows (the server assigns
-    fresh row ids), nutrients are re-aggregated per-100g of the new batch,
-    and "full recipe" follows the batch weight while the serving keeps its
-    weight."""
     client, state = make_cold_client(
         tmp_path, [recipe(), foods_response(BANANA, EGG, PB), OK]
     )
@@ -425,7 +389,6 @@ def test_ingredients_replace_list_and_rederive_nutrients(tmp_path):
         204: round(50.0 * 0.16 * 100 / total, 6),
         208: round((89 * 1.5 + 143 * 0.5 + 588 * 0.16) * 100 / total, 6),
     }
-    # Nutrients the new ingredients don't carry (512 here) are gone, not stale.
     assert 512 not in amounts
 
     by_id = measures_by_id(data)
@@ -434,7 +397,6 @@ def test_ingredients_replace_list_and_rederive_nutrients(tmp_path):
     assert by_id[313167827] == measures_by_id(recipe())[313167827]
     assert by_id[313167826] == measures_by_id(recipe())[313167826]
 
-    # Everything else is untouched.
     untouched = ("ingredients", "nutrients", "measures")
     assert without(data, *untouched) == without(recipe(), "messages", *untouched)
     assert result["total_grams"] == total
@@ -475,8 +437,6 @@ def test_ingredients_and_serving_together(tmp_path):
 
 
 def test_recipe_without_full_recipe_measure_still_updates(tmp_path):
-    """App-made recipes may lack the measure; the server derives the batch
-    weight anyway, so its absence is not an error."""
     food = recipe()
     food["measures"] = [m for m in food["measures"] if m["name"] != "full recipe"]
     client, state = make_cold_client(tmp_path, [food, foods_response(EGG), OK])
@@ -567,8 +527,6 @@ def test_refuses_plain_custom_foods(tmp_path, ingredients):
 
 
 def test_refuses_serving_based_recipes(tmp_path):
-    """Serving-based recipes ("Recipe"-type measures) store nutrients per
-    batch, not per-100g; editing them is untested, so they are refused."""
     food = recipe()
     food["measures"][1]["type"] = "Recipe"
     client, state = make_cold_client(tmp_path, [food, OK])
@@ -595,7 +553,6 @@ def test_unexpected_save_response_raises(tmp_path, response):
 
 
 def test_save_failure_body_raises_after_one_retry(tmp_path):
-    """A FAIL body is retried once after re-login, then surfaces."""
     fail = {"result": "FAIL", "error": "nope"}
     client, state = make_cold_client(tmp_path, [recipe(), fail, fail])
 
@@ -665,7 +622,6 @@ def test_retire_custom_food_still_refuses_recipes(tmp_path):
 
 
 def test_recipe_edits_hold_the_food_lock(tmp_path):
-    """get_food, get_foods, and add_food all run under the food's lock."""
     client, _ = make_cold_client(
         tmp_path, [recipe(), foods_response(EGG), OK, recipe(), OK]
     )

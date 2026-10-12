@@ -770,8 +770,6 @@ def get_food_details(food_id: int) -> str:
             "measures": measures,
             "nutrients": data.get("nutrients", []),
         }
-        # Recipes: the ingredient list in update_recipe's input shape, so it
-        # can be edited and sent back.
         if data.get("ingredients"):
             details["ingredients"] = [
                 {
@@ -980,11 +978,7 @@ _INGREDIENT_KEYS = frozenset({"food_id", "grams", "measure_id"})
 
 
 def _parse_ingredient_dicts(ingredients: list[dict]) -> list[tuple]:
-    """Turn the tools' ingredient dicts into the client's tuples.
-
-    Unknown keys are rejected rather than ignored, so a typo ("gram") can't
-    silently drop an override.
-    """
+    """Ingredient dicts to client tuples; unknown keys are rejected."""
     parsed = []
     for item in ingredients:
         if "food_id" not in item or "grams" not in item:
