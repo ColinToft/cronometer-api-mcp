@@ -570,3 +570,11 @@ def test_update_custom_food_refuses_unusable_serving_weight(tmp_path, value):
 
     client.update_custom_food(FOOD_ID, calories=100, serving_grams=50)
     assert nutrients_by_id(state["payloads"][2])[208] == 200.0
+
+
+def test_update_custom_food_refuses_unmatched_default_measure(tmp_path):
+    client, state = make_cold_client(tmp_path, [custom_food(defaultMeasureId=901)])
+
+    with pytest.raises(CronometerError, match="default measure 901 isn't one"):
+        client.update_custom_food(FOOD_ID, calories=100)
+    assert len(state["payloads"]) == 1  # the read, no save

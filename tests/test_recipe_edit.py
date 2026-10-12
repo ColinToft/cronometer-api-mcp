@@ -1265,6 +1265,25 @@ def test_get_food_details_plain_food_has_no_recipe_fields(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_create_recipe_read_back_without_default_measure_id(tmp_path):
+    fake = FakeFoodServer(ingredient_foods=[EGG])
+    client, _ = make_server_client(tmp_path, fake)
+    handle = fake.handle
+
+    def broken(endpoint, body):
+        out = handle(endpoint, body)
+        if endpoint == "/api/v2/get_food":
+            out.pop("defaultMeasureId")
+        return out
+
+    fake.handle = broken
+
+    with pytest.raises(
+        CronometerError, match=r"exists \(id 4242\).*'defaultMeasureId'"
+    ):
+        client.create_recipe("R", ingredients=[(1234, 100)])
+
+
 @pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)
 def test_create_recipe_rejects_leading_quantity(tmp_path, serving_name):
     """The app would show "1 2 bowls"; the number belongs in serving_quantity."""

@@ -768,7 +768,7 @@ class CronometerClient:
                 food = self.get_food(food_id)
                 _, serving = self._settle_serving(
                     food,
-                    food.get("defaultMeasureId"),
+                    food["defaultMeasureId"],
                     serving_name,
                     serving_quantity,
                     serving_grams,
@@ -858,11 +858,17 @@ class CronometerClient:
 
     @staticmethod
     def _default_measure(food: dict) -> dict | None:
+        """The food's default measure, or None if it has no measures."""
         measures = food.get("measures") or []
+        if not measures:
+            return None
         for m in measures:
-            if m.get("id") == food.get("defaultMeasureId"):
+            if m["id"] == food["defaultMeasureId"]:
                 return m
-        return measures[0] if measures else None
+        raise CronometerError(
+            f"Food {food['id']}'s default measure {food['defaultMeasureId']} "
+            f"isn't one of its measures; fix it in the Cronometer app"
+        )
 
     def update_custom_food(
         self,
@@ -1143,7 +1149,7 @@ class CronometerClient:
         try:
             with self._food_lock(food_id):
                 food = self.get_food(food_id)
-                measure_id = food.get("defaultMeasureId")
+                measure_id = food["defaultMeasureId"]
                 food, serving = self._settle_recipe_serving(
                     food, measure_id, serving_name, serving_quantity, serving_grams
                 )

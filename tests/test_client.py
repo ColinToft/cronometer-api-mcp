@@ -1291,6 +1291,66 @@ def test_create_custom_food_rejects_bad_serving(tmp_path, kwargs, match):
     assert state["payloads"] == []
 
 
+def _failing_server(fail_on: str, call: int) -> FakeFoodServer:
+    """A FakeFoodServer whose `call`-th request to `fail_on` raises."""
+    fake = FakeFoodServer()
+    handle, seen = fake.handle, {"n": 0}
+
+    def flaky(endpoint, body):
+        if endpoint == f"/api/v2/{fail_on}":
+            seen["n"] += 1
+            if seen["n"] == call:
+                raise CronometerError(f"{fail_on} timed out")
+        return handle(endpoint, body)
+
+    fake.handle = flaky
+    return fake
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "call", "serving_name", "add_foods"),
+    [
+        ("get_food", 1, "serving", 1),
+        ("add_food", 2, "serving (1/2 batch)", 2),
+    ],
+)
+def test_create_custom_food_failure_after_save_names_the_id(
+    tmp_path, fail_on, call, serving_name, add_foods
+):
+    client, state = make_server_client(tmp_path, _failing_server(fail_on, call))
+
+    with pytest.raises(CronometerError, match=r"exists \(id 4242\)"):
+        _create(client, serving_name=serving_name)
+    assert state["endpoints"].count("add_food") == add_foods
+
+
+@pytest.mark.parametrize(
+    ("break_read_back", "match"),
+    [
+        (lambda food: food.update(measures=[]), "has no measure 9000"),
+        (lambda food: food.pop("defaultMeasureId"), "'defaultMeasureId'"),
+    ],
+)
+def test_create_custom_food_read_back_without_default_measure(
+    tmp_path, break_read_back, match
+):
+    fake = FakeFoodServer()
+    client, state = make_server_client(tmp_path, fake)
+    handle = fake.handle
+
+    def broken(endpoint, body):
+        out = handle(endpoint, body)
+        if endpoint == "/api/v2/get_food":
+            break_read_back(out)
+        return out
+
+    fake.handle = broken
+
+    with pytest.raises(CronometerError, match=rf"exists \(id 4242\).*{match}"):
+        _create(client)
+    assert state["endpoints"] == ["add_food", "get_food"]
+
+
 def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
     client, state = make_server_client(tmp_path, FakeFoodServer())
     monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
