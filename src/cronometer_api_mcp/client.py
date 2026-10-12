@@ -1224,6 +1224,8 @@ class CronometerClient:
                 grams,
             )
             serving.update(name=name, amount=quantity, value=grams)
+            # Empty again, so this read-back also proves the server derived them.
+            food["nutrients"] = []
             self._save_food(food)
             food = self.get_food(food_id)
         raise CronometerError(
@@ -1303,6 +1305,7 @@ class CronometerClient:
         with self._food_lock(food_id):
             food = self._get_user_food(food_id, recipe=True)
             batch_before = _ingredient_grams(food)
+            _check_batch_matches_ingredients(food, batch_before)
 
             self._rename(food, name)
             if comments is not None:
@@ -1345,17 +1348,23 @@ class CronometerClient:
             food["nutrients"] = []
 
             self._save_food(food)
-            if serving is None:
-                food = self.get_food(food_id)
-                _check_derived_nutrients(food)
-            else:
-                food, serving = self._settle_recipe_serving(
-                    self.get_food(food_id),
-                    serving["id"],
-                    serving["name"],
-                    serving["amount"],
-                    serving["value"],
-                )
+            try:
+                if serving is None:
+                    food = self.get_food(food_id)
+                    _check_derived_nutrients(food)
+                else:
+                    food, serving = self._settle_recipe_serving(
+                        self.get_food(food_id),
+                        serving["id"],
+                        serving["name"],
+                        serving["amount"],
+                        serving["value"],
+                    )
+            except Exception as e:
+                # The edit is saved; say so rather than leave the caller unsure.
+                raise CronometerError(
+                    f"Recipe {food_id} was saved; verify with get_food_details. {e}"
+                ) from e
 
         logger.info(
             "Updated recipe %r (id=%d, %d ingredients, %.1fg batch)",
@@ -2308,6 +2317,23 @@ def _check_derived_nutrients(food: dict) -> None:
             f"Recipe {food['id']} was saved, but the server returned no derived "
             f"nutrients for it"
         )
+
+
+def _check_batch_matches_ingredients(food: dict, batch_grams: float) -> None:
+    """Refuse a recipe whose stored "full recipe" weight isn't its ingredient
+    total: its batch weight was set in the app, which this client doesn't
+    model. An id-0 "full recipe" is the server's placeholder, not stored."""
+    for m in food["measures"]:
+        if (
+            _measure_key(m["name"]) == _FULL_RECIPE_MEASURE
+            and m["id"]
+            and abs(m["value"] - batch_grams) > _GRAMS_TOL
+        ):
+            raise CronometerError(
+                f"Recipe {food['id']}'s batch weight ({m['value']:g} g) was set in "
+                f"the Cronometer app and doesn't match its ingredients "
+                f"({batch_grams:g} g); edit it there"
+            )
 
 
 def _ingredient_grams(food: dict) -> float:

@@ -179,6 +179,14 @@ def endpoints(state) -> list[str]:
 SAVE = ["get_food", "add_food", "get_food"]  # fetch, save, read back
 
 
+def add_food_payloads(state) -> list[dict]:
+    return [
+        p["data"]
+        for e, p in zip(state["endpoints"], state["payloads"], strict=True)
+        if e == "add_food"
+    ]
+
+
 def measures_by_id(food: dict) -> dict[int, dict]:
     return {m["id"]: m for m in food["measures"]}
 
@@ -667,6 +675,7 @@ def test_get_food_details_ingredients_round_trip(tmp_path, monkeypatch):
             },
         ]
     )
+    measures_by_id(food)[313167828]["value"] = 220  # full recipe = ingredients
     client, state = recipe_client(tmp_path, food)
     monkeypatch.setattr(server, "_get_client", lambda: client)
 
@@ -1090,6 +1099,7 @@ def test_update_recipe_resends_serving_if_server_rewrites_it(tmp_path):
         client.update_recipe(RECIPE_ID, serving_name="serving (1/2 batch)")
 
     assert state["endpoints"].count("add_food") == 2
+    assert add_food_payloads(state)[1]["nutrients"] == []  # re-proves derivation
 
 
 # ---------------------------------------------------------------------------
@@ -1497,6 +1507,7 @@ def test_create_recipe_resends_serving_with_mangled_grams(tmp_path):
     )
 
     assert state["endpoints"].count("add_food") == 2
+    assert add_food_payloads(state)[1]["nutrients"] == []  # re-proves derivation
     assert result["serving_grams"] == 40
     m = measures_by_id(srv.foods[result["food_id"]])[result["measure_id"]]
     assert m["value"] == 40
@@ -1696,3 +1707,61 @@ def test_serving_more_than_the_tolerance_over_the_batch_is_refused(tmp_path):
         client.update_recipe(RECIPE_ID, serving_grams=152.02)
 
     assert "add_food" not in endpoints(state)
+
+
+@pytest.mark.parametrize("full_id", [313167828, 0])
+def test_batch_weight_set_in_app_is_refused(tmp_path, full_id):
+    """A stored "full recipe" that isn't the ingredient total was set in the
+    app; an id-0 one is the server's placeholder and is ignored."""
+    food = recipe()
+    full = measures_by_id(food)[313167828]
+    full["id"], full["value"] = full_id, 500
+    client, state = recipe_client(tmp_path, food)
+
+    if full_id:
+        with pytest.raises(
+            CronometerError,
+            match=r"batch weight \(500 g\) was set in the Cronometer app and "
+            r"doesn't match its ingredients \(152 g\); edit it there",
+        ):
+            client.update_recipe(RECIPE_ID, name="X")
+        assert endpoints(state) == ["get_food"]
+    else:
+        client.update_recipe(RECIPE_ID, name="X")
+        assert "add_food" in endpoints(state)
+
+
+def test_batch_weight_within_tolerance_is_accepted(tmp_path):
+    food = recipe()
+    measures_by_id(food)[313167828]["value"] = 152.004
+    client, state = recipe_client(tmp_path, food)
+
+    client.update_recipe(RECIPE_ID, name="X")
+
+    assert "add_food" in endpoints(state)
+
+
+def test_update_recipe_timeout_on_read_back_says_it_was_saved(tmp_path):
+    class TimeoutOnReadBack(FakeFoodServer):
+        calls = 0
+
+        def handle(self, endpoint, payload):
+            if endpoint == "/api/v2/get_food":
+                self.calls += 1
+                if self.calls == 2:
+                    raise self.timeout
+            return super().handle(endpoint, payload)
+
+    srv = TimeoutOnReadBack(foods=[recipe()], ingredient_foods=[BANANA, EGG, PB])
+    srv.timeout = httpx.ReadTimeout("read timed out")
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError) as err:
+        client.update_recipe(RECIPE_ID, name="X")
+
+    assert str(err.value) == (
+        f"Recipe {RECIPE_ID} was saved; verify with get_food_details. read timed out"
+    )
+    assert err.value.__cause__ is srv.timeout
+    assert state["endpoints"].count("add_food") == 1
+    assert srv.foods[RECIPE_ID]["name"] == "X"
