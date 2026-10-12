@@ -226,7 +226,7 @@ readable by id, and diary entries that use it are kept).
 Retired foods can't be edited. Serving names are sent exactly as given with an explicit quantity,
 so `add_custom_food`, `update_custom_food`, `add_recipe` and `update_recipe` refuse a name that
 starts with a number ("2 cookies"): pass `serving_quantity=2, serving_name="cookies"`. When the
-server re-parses a new recipe measure's name (it does for some names when the quantity is 1, e.g.
+server re-parses a new measure's name (it does for some names when the quantity is 1, e.g.
 "serving (1/2 batch)"), the client re-sends the measure verbatim, which sticks.
 
 Recipe import is the one asynchronous operation: `import_recipe` returns a job id, and `poll_async_result` is polled until the server reports 100% progress and attaches the parsed ingredients.

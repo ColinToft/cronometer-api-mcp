@@ -9,6 +9,7 @@ the failure was surfaced to callers as a success.
 from __future__ import annotations
 
 import copy
+import json
 import re
 import threading
 import time
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from cronometer_api_mcp import server as mcp_server
 from cronometer_api_mcp.client import CronometerClient, CronometerError
 
 # Real response body observed from an expired session.
@@ -1005,7 +1007,7 @@ def test_import_recipe_rejects_blank_input(tmp_path, monkeypatch):
 
 def test_create_custom_food_extra_nutrients_payload(tmp_path):
     """extra_nutrients are appended, normalized to per-100g like the macros."""
-    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+    client, state = make_server_client(tmp_path, FakeFoodServer())
 
     client.create_custom_food(
         "Test Food",
@@ -1218,12 +1220,54 @@ def _create(client, **kwargs):
     ],
 )
 def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
-    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+    client, state = make_server_client(tmp_path, FakeFoodServer())
 
-    _create(client, serving_grams=30, **kwargs)
+    result = _create(client, serving_grams=30, **kwargs)
 
+    assert state["endpoints"] == ["add_food", "get_food"]
     (measure,) = state["payloads"][0]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == (name, amount, 30)
+    assert result == {"food_id": 4242, "measure_id": 9000}
+
+
+@pytest.mark.parametrize(
+    "serving_name", ["serving (1/2 batch)", "cup 1/3 full", "slice (1/4 pie)"]
+)
+def test_create_custom_food_resends_reparsed_serving(tmp_path, serving_name):
+    """A new measure's name can be re-parsed by the server (server_reparse);
+    the serving is re-sent once, verbatim, and the nutrients are kept."""
+    server = FakeFoodServer()
+    client, state = make_server_client(tmp_path, server)
+
+    result = _create(client, serving_name=serving_name, serving_grams=250)
+
+    assert state["endpoints"] == ["add_food", "get_food", "add_food", "get_food"]
+    sent = state["payloads"][2]["data"]
+    assert sent["nutrients"] == state["payloads"][0]["data"]["nutrients"]
+    (measure,) = server.foods[result["food_id"]]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"]) == (
+        serving_name,
+        1,
+        250,
+    )
+
+
+def test_create_custom_food_raises_with_id_when_serving_wont_settle(tmp_path):
+    """A serving still rewritten after the re-send is an error naming the
+    food id, since the food already exists."""
+    server = FakeFoodServer()
+    client, state = make_server_client(tmp_path, server)
+    save = server._save
+
+    def reparse_every_save(food):
+        food["measures"][0].update(name="batch)", amount=0.5)
+        return save(food)
+
+    server._save = reparse_every_save
+
+    with pytest.raises(CronometerError, match=r"exists \(id 4242\).*reads back as"):
+        _create(client, serving_name="serving (1/2 batch)")
+    assert state["endpoints"] == ["add_food", "get_food", "add_food", "get_food"]
 
 
 @pytest.mark.parametrize(
@@ -1245,3 +1289,26 @@ def test_create_custom_food_rejects_bad_serving(tmp_path, kwargs, match):
     with pytest.raises(ValueError, match=match):
         _create(client, **kwargs)
     assert state["payloads"] == []
+
+
+def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
+    client, state = make_server_client(tmp_path, FakeFoodServer())
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
+
+    out = json.loads(
+        mcp_server.add_custom_food(
+            "Cookies",
+            calories=100,
+            protein_g=2,
+            fat_g=5,
+            carbs_g=12,
+            serving_name="cookies",
+            serving_grams=30,
+            serving_quantity=2,
+        )
+    )
+
+    assert out["status"] == "success"
+    assert (out["food_id"], out["measure_id"]) == (4242, 9000)
+    (measure,) = state["payloads"][0]["data"]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"]) == ("cookies", 2, 30)

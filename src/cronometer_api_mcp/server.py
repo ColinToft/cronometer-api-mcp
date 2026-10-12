@@ -832,7 +832,8 @@ def add_custom_food(
             named macro args already cover.
         serving_name: Unit name for the serving (default "serving"). A name
             that starts with a number ("2 cookies") is refused.
-        serving_grams: Weight of one serving in grams (default 100).
+        serving_grams: Total weight of the serving (all serving_quantity
+            units) in grams (default 100).
         serving_quantity: Units per serving (default 1), e.g. 2 "cookies".
     """
     try:
@@ -852,11 +853,6 @@ def add_custom_food(
             serving_grams=serving_grams,
             serving_quantity=serving_quantity,
         )
-
-        # Fetch back to get the server-assigned measure_id
-        food_data = client.get_food(result["food_id"])
-        result["measure_id"] = food_data.get("defaultMeasureId")
-
         return _ok(
             {
                 "food_id": result["food_id"],

@@ -528,3 +528,45 @@ def test_concurrent_edits_of_one_food_are_serialized(tmp_path):
     ]
     assert state["payloads"][1]["data"]["name"] == "A"
     assert state["payloads"][3]["data"]["retired"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"serving_name": "cup"},
+        {"serving_grams": 30},
+        {"serving_quantity": 2},
+        {"calories": 100},
+        {"extra_nutrients": {601: 5}},
+    ],
+)
+def test_update_custom_food_without_measure_refuses_serving_edits(tmp_path, kwargs):
+    client, state = make_cold_client(tmp_path, [custom_food(measures=[])])
+
+    with pytest.raises(CronometerError, match="has no serving measure"):
+        client.update_custom_food(FOOD_ID, **kwargs)
+    assert len(state["payloads"]) == 1  # the read, no save
+
+
+def test_update_custom_food_without_measure_still_renames(tmp_path):
+    client, state = make_cold_client(tmp_path, [custom_food(measures=[]), OK])
+
+    client.update_custom_food(FOOD_ID, name="Renamed")
+
+    assert state["payloads"][1]["data"]["name"] == "Renamed"
+
+
+@pytest.mark.parametrize("value", [0, -5, None, float("nan"), float("inf"), "50"])
+def test_update_custom_food_refuses_unusable_serving_weight(tmp_path, value):
+    """Per-serving nutrients need a real serving weight to convert to per-100g;
+    there is no fallback scale."""
+    food = custom_food()
+    food["measures"][0]["value"] = value
+    client, state = make_cold_client(tmp_path, [food, food, OK])
+
+    with pytest.raises(CronometerError, match="per-serving nutrients"):
+        client.update_custom_food(FOOD_ID, calories=100)
+    assert len(state["payloads"]) == 1
+
+    client.update_custom_food(FOOD_ID, calories=100, serving_grams=50)
+    assert nutrients_by_id(state["payloads"][2])[208] == 200.0
