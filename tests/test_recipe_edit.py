@@ -212,14 +212,7 @@ def test_rename_resends_recipe_unchanged_apart_from_name(tmp_path):
         "name": "Renamed",
         "total_grams": 152,
         "ingredient_count": 2,
-        "servings_per_batch": {"before": 2.0, "after": 2.0},
-        "serving": {
-            "measure_id": 313167825,
-            "name": "serving (1/2 batch)",
-            "quantity": 1,
-            "grams": 76,
-        },
-    }
+    }  # the serving wasn't edited, so it isn't resolved or reported
 
 
 def test_rename_leaves_other_language_translations_alone(tmp_path):
@@ -397,8 +390,8 @@ def test_ambiguous_serving_raises(tmp_path):
     )
     client, state = recipe_client(tmp_path, food)
 
-    with pytest.raises(CronometerError, match="Can't tell which measure"):
-        client.update_recipe(RECIPE_ID, name="X")
+    with pytest.raises(CronometerError, match=r"several servings \['serving"):
+        client.update_recipe(RECIPE_ID, serving_grams=50)
 
     assert endpoints(state) == ["get_food"]
 
@@ -442,6 +435,63 @@ def test_several_servings_still_allow_non_serving_edits(tmp_path):
     assert saved(state)["name"] == "Renamed"
 
 
+def drifted_recipe(kind: str) -> dict:
+    """A recipe whose default drifted to "g", with several named servings
+    ("several") or none at all ("none")."""
+    food = recipe(defaultMeasureId=313167826)  # "g"
+    if kind == "several":
+        food["measures"].append(
+            {"id": 5, "name": "bowl", "amount": 1, "value": 100, "type": "Weight"}
+        )
+    else:
+        food["measures"] = [
+            m for m in food["measures"] if m["name"] != "serving (1/2 batch)"
+        ]
+    return food
+
+
+@pytest.mark.parametrize("kind", ["several", "none"])
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": "Renamed"},
+        {"comments": "new"},
+        {"ingredients": [(1234, 152)]},  # same batch weight
+    ],
+)
+def test_non_serving_edits_ignore_the_serving(tmp_path, kind, kwargs):
+    food = drifted_recipe(kind)
+    client, state = recipe_client(tmp_path, food)
+
+    result = client.update_recipe(RECIPE_ID, **kwargs)
+
+    assert endpoints(state) == [
+        e
+        for e in ["get_food", "get_foods", "add_food", "get_food"]
+        if e != "get_foods" or "ingredients" in kwargs
+    ]
+    assert saved(state)["measures"] == food["measures"]
+    assert "serving" not in result and "servings_per_batch" not in result
+
+
+def test_batch_change_without_a_serving_needs_no_sizing(tmp_path):
+    client, _ = recipe_client(tmp_path, drifted_recipe("none"))
+
+    result = client.update_recipe(RECIPE_ID, ingredients=[(1234, 400)])
+
+    assert result["total_grams"] == 400
+    assert "serving" not in result
+
+
+def test_serving_edit_without_a_serving_raises(tmp_path):
+    client, state = recipe_client(tmp_path, drifted_recipe("none"))
+
+    with pytest.raises(CronometerError, match="has no serving measure"):
+        client.update_recipe(RECIPE_ID, serving_grams=50)
+
+    assert endpoints(state) == ["get_food"]
+
+
 def test_missing_default_measure_uses_sole_serving(tmp_path):
     client, state = recipe_client(tmp_path, recipe(defaultMeasureId=1))
 
@@ -462,7 +512,7 @@ def test_ingredients_replace_list_leaving_derivation_to_server(tmp_path):
     client, state = recipe_client(tmp_path)
 
     result = client.update_recipe(
-        RECIPE_ID, ingredients=[(450856, 150), (1234, 50), (619, 16)]
+        RECIPE_ID, ingredients=[(450856, 150), (1234, 50), (619, 16)], serving_grams=76
     )
 
     assert endpoints(state) == ["get_food", "get_foods", "add_food", "get_food"]
@@ -508,7 +558,7 @@ def test_ingredients_replace_list_leaving_derivation_to_server(tmp_path):
 def test_ingredient_measure_override(tmp_path):
     client, state = recipe_client(tmp_path)
 
-    client.update_recipe(RECIPE_ID, ingredients=[(1234, 100, 3770)])
+    client.update_recipe(RECIPE_ID, ingredients=[(1234, 152, 3770)])
 
     assert saved(state)["ingredients"][0]["measureId"] == 3770
 
@@ -570,7 +620,7 @@ def test_recipe_without_full_recipe_measure_still_updates(tmp_path):
     food["measures"] = [m for m in food["measures"] if m["name"] != "full recipe"]
     client, state = recipe_client(tmp_path, food)
 
-    result = client.update_recipe(RECIPE_ID, ingredients=[(1234, 100)])
+    result = client.update_recipe(RECIPE_ID, ingredients=[(1234, 152)])
 
     sent = saved(state)["measures"]
     assert [(m["id"], m["name"]) for m in sent] == [
@@ -579,7 +629,7 @@ def test_recipe_without_full_recipe_measure_still_updates(tmp_path):
         (313167827, "oz"),
         (313167826, "g"),
     ]
-    assert result["total_grams"] == 100
+    assert result["total_grams"] == 152
 
 
 def test_missing_ingredient_food_raises_before_saving(tmp_path):
@@ -808,7 +858,7 @@ def test_recipe_edits_hold_the_food_lock(tmp_path):
 
     client._http.post = spying_post  # type: ignore[method-assign]
 
-    client.update_recipe(RECIPE_ID, ingredients=[(1234, 100)])
+    client.update_recipe(RECIPE_ID, ingredients=[(1234, 152)])
     client.retire_custom_food(RECIPE_ID)
 
     assert seen == [
@@ -899,6 +949,53 @@ def test_settle_compares_quantity_with_tolerance(tmp_path):
     )
 
     assert state["endpoints"].count("add_food") == 1
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_indivisible_batch_serving_is_rounded(tmp_path, action):
+    """151 g / 6 = 25.1666... is sent as 25.17 g."""
+    if action == "create":
+        srv = FakeFoodServer(ingredient_foods=[EGG])
+        client, state = make_server_client(tmp_path, srv)
+        result = client.create_recipe(
+            "R", ingredients=[(1234, 151)], servings_per_batch=6
+        )
+        assert result["serving_grams"] == 25.17
+    else:
+        client, state = recipe_client(tmp_path)
+        result = client.update_recipe(
+            RECIPE_ID, ingredients=[(1234, 151)], servings_per_batch=6
+        )
+        assert result["serving"]["grams"] == 25.17
+        # Reported from the rounded grams actually stored: 151 / 25.17.
+        assert result["servings_per_batch"]["after"] == 5.999
+    sent = state["payloads"][state["endpoints"].index("add_food")]["data"]
+    assert 25.17 in [m["value"] for m in sent["measures"]]
+    assert state["endpoints"].count("add_food") == 1
+
+
+@pytest.mark.parametrize(("stored", "resent"), [(25.166667, False), (25.19, True)])
+def test_settle_compares_grams_with_an_absolute_tolerance(tmp_path, stored, resent):
+    """Within 0.01 g of what was sent is a match; further off is re-sent."""
+
+    class GramsRoundingServer(FakeFoodServer):
+        saves = 0
+
+        def _save(self, food):
+            resp = super()._save(food)
+            self.saves += 1
+            if self.saves == 1:
+                for m in self.foods[food["id"]]["measures"]:
+                    if m["name"] == "Serving":
+                        m["value"] = stored
+            return resp
+
+    srv = GramsRoundingServer(ingredient_foods=[EGG])
+    client, state = make_server_client(tmp_path, srv)
+
+    client.create_recipe("R", ingredients=[(1234, 151)], servings_per_batch=6)
+
+    assert state["endpoints"].count("add_food") == (2 if resent else 1)
 
 
 class StubbornServer(FakeFoodServer):
@@ -1126,6 +1223,17 @@ def test_get_food_details_lists_recipe_ingredients(monkeypatch):
     assert out["retired"] is True
 
 
+def test_get_food_details_recipe_without_comments_key(monkeypatch):
+    """A recipe saved without comments has no "comments" key (seen live)."""
+    food = recipe()
+    del food["comments"]
+    monkeypatch.setattr(server, "_get_client", lambda: FakeClient(food=food))
+
+    out = json.loads(server.get_food_details(RECIPE_ID))
+
+    assert out["comments"] is None
+
+
 def test_get_food_details_plain_food_has_no_recipe_fields(monkeypatch):
     fake = FakeClient(food=recipe(ingredients=[], comments=None))
     monkeypatch.setattr(server, "_get_client", lambda: fake)
@@ -1294,21 +1402,66 @@ def test_zero_calorie_recipe_create_passes(tmp_path):
 def test_zero_calorie_recipe_update_passes(tmp_path):
     client, _ = recipe_client(tmp_path)
 
-    result = client.update_recipe(RECIPE_ID, ingredients=[(455493, 500)])
+    result = client.update_recipe(
+        RECIPE_ID, ingredients=[(455493, 500)], servings_per_batch=2
+    )
 
     assert result["total_grams"] == 500
 
 
-def test_servings_per_batch_shows_a_drifted_fraction(tmp_path):
-    """A "1/2 batch" serving (76 of 152 g) is a third of a 228 g batch unless
-    serving_grams is recomputed."""
+@pytest.mark.parametrize("grams", [228, 100])
+def test_batch_change_without_sizing_is_refused(tmp_path, grams):
+    """A "1/2 batch" serving (76 of 152 g) would silently become another
+    fraction of the new batch, so the caller must say which to keep."""
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError) as err:
+        client.update_recipe(RECIPE_ID, ingredients=[(1234, grams)], name="X")
+
+    msg = str(err.value)
+    assert f"from 152 g to {grams} g" in msg
+    assert "'serving (1/2 batch)' (76 g)" in msg
+    assert "servings_per_batch=N to keep the fraction" in msg
+    assert "serving_grams=76 to keep the weight" in msg
+    assert "add_food" not in endpoints(state)
+
+
+def test_batch_change_with_serving_name_only_is_refused(tmp_path):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="servings_per_batch=N"):
+        client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)], serving_name="bowl")
+
+    assert "add_food" not in endpoints(state)
+
+
+@pytest.mark.parametrize(
+    "sizing", [{}, {"servings_per_batch": 2}, {"serving_grams": 76}]
+)
+def test_batch_change_refused_when_serving_is_ambiguous(tmp_path, sizing):
+    client, state = recipe_client(tmp_path, drifted_recipe("several"))
+
+    with pytest.raises(CronometerError, match="several servings.*ambiguous"):
+        client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)], **sizing)
+
+    assert "add_food" not in endpoints(state)
+
+
+def test_batch_change_keeping_the_weight_reports_the_new_fraction(tmp_path):
     client, _ = recipe_client(tmp_path)
 
-    drifted = client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)])
-    assert drifted["servings_per_batch"] == {"before": 2.0, "after": 3.0}
+    kept = client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)], serving_grams=76)
 
-    kept = client.update_recipe(RECIPE_ID, ingredients=[(1234, 228)], serving_grams=114)
-    assert kept["servings_per_batch"] == {"before": 3.0, "after": 2.0}
+    assert kept["servings_per_batch"] == {"before": 2.0, "after": 3.0}
+
+
+def test_tiny_batch_change_counts_as_unchanged(tmp_path):
+    client, state = recipe_client(tmp_path)
+
+    result = client.update_recipe(RECIPE_ID, ingredients=[(1234, 152.004)])
+
+    assert "serving" not in result
+    assert "add_food" in endpoints(state)
 
 
 def test_derived_energy_is_checked_on_every_save(tmp_path):
@@ -1316,7 +1469,7 @@ def test_derived_energy_is_checked_on_every_save(tmp_path):
     srv = FakeFoodServer(foods=[recipe()], ingredient_foods=[BANANA, EGG, PB])
     client, _ = make_server_client(tmp_path, srv)
 
-    client.update_recipe(RECIPE_ID, ingredients=[(1234, 100)])
+    client.update_recipe(RECIPE_ID, ingredients=[(1234, 152)])
     energy = {n["id"]: n["amount"] for n in srv.foods[RECIPE_ID]["nutrients"]}[208]
     assert energy == pytest.approx(143.0)
 
@@ -1393,7 +1546,7 @@ def test_update_recipe_rejects_ingredients_that_shrink_below_serving(tmp_path):
     client, state = recipe_client(tmp_path)
 
     with pytest.raises(ValueError, match="76 is more than the whole batch"):
-        client.update_recipe(RECIPE_ID, ingredients=[(1234, 50)])
+        client.update_recipe(RECIPE_ID, ingredients=[(1234, 50)], serving_grams=76)
 
     assert "add_food" not in endpoints(state)
 

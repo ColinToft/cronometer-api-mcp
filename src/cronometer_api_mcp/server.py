@@ -779,6 +779,7 @@ def get_food_details(food_id: int) -> str:
                 }
                 for i in data["ingredients"]
             ]
+            # A recipe saved without comments has no "comments" key (seen live).
             details["comments"] = data.get("comments")
         if data.get("retired"):
             details["retired"] = True
@@ -1081,8 +1082,9 @@ def update_recipe(
             [{"food_id": int, "grams": float, "measure_id"?: int}] form. It
             replaces the old list entirely: to change one ingredient, read the
             current list with get_food_details and send it all back with that
-            change. To keep a "serving (1/N batch)" at 1/N, also pass
-            servings_per_batch=N.
+            change. If the new list changes the batch weight, also pass
+            servings_per_batch=N to keep a "serving (1/N batch)" at 1/N, or
+            serving_grams to keep its weight; without either it's refused.
         name: New recipe name.
         serving_name: New name for the recipe's serving, stored exactly as
             given, e.g. "serving (1/6 batch)". Its quantity and weight are
@@ -1091,7 +1093,8 @@ def update_recipe(
         serving_grams: New weight of the serving in grams, at most the batch
             weight. Unlike update_custom_food, this keeps the quantity.
         servings_per_batch: Instead of serving_grams, make the serving this
-            fraction of the (new) batch: batch grams / servings_per_batch.
+            fraction of the (new) batch: batch grams / servings_per_batch,
+            rounded to 0.01 g.
         serving_quantity: How many units the serving is; the app shows
             "<quantity> <serving_name>", e.g. 1.5 with "cups".
         comments: New recipe notes ("" clears them).

@@ -85,6 +85,11 @@ _OZ_GRAMS = 28.3495231
 # marks them (the API data has no other distinguishing field).
 _FULL_RECIPE_MEASURE = "full recipe"
 _RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
+# Recipe serving weights are sent rounded to this many decimals, and read back
+# within _GRAMS_TOL: a batch that doesn't divide evenly (4561 g / 6) would
+# otherwise send an unbounded float.
+_GRAMS_DECIMALS = 2
+_GRAMS_TOL = 0.01
 
 # A serving name that leads with a plain number, e.g. "2 cookies".
 _QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
@@ -1040,7 +1045,8 @@ class CronometerClient:
             serving_grams: Grams in one serving. Defaults to the full batch
                 weight (i.e. one serving = the whole recipe).
             servings_per_batch: Instead of serving_grams, size the serving as
-                this fraction of the batch (batch grams / servings_per_batch).
+                this fraction of the batch (batch grams / servings_per_batch,
+                rounded to 0.01 g).
             serving_quantity: How many units the serving is ("1.5" for
                 "1.5 cups"); the app shows "<quantity> <serving_name>".
             comments: Free-text recipe notes.
@@ -1051,12 +1057,11 @@ class CronometerClient:
         parsed = _parse_recipe_ingredients(ingredients)
         _check_name(name)
         serving_name = _recipe_serving_name(serving_name)
-        _check_positive("serving_quantity", serving_quantity)
+        _check_serving_args(serving_grams, servings_per_batch, serving_quantity)
         batch_grams = sum(g for _, g, _ in parsed)
-        serving_grams = _resolve_serving_grams(
-            serving_grams, servings_per_batch, batch_grams
-        )
-        if serving_grams is None:
+        if servings_per_batch is not None:
+            serving_grams = _serving_fraction(batch_grams, servings_per_batch)
+        elif serving_grams is None:
             serving_grams = batch_grams
         _check_serving_fits(serving_grams, batch_grams)
         ingredient_rows = self._ingredient_rows(parsed)
@@ -1150,32 +1155,34 @@ class CronometerClient:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _recipe_serving(food: dict, *, editing: bool) -> dict:
+    def _recipe_servings(food: dict) -> list[dict]:
+        """The recipe's non-fixed measures (anything but g, oz, full recipe)."""
+        return [
+            m
+            for m in food.get("measures") or []
+            if not _is_fixed_recipe_measure(m["name"])
+        ]
+
+    @classmethod
+    def _recipe_serving(cls, food: dict) -> dict:
         """The recipe's serving measure: its one non-fixed measure.
 
-        Not simply the default measure: logging a recipe with another measure
-        makes that one the default (seen live: logging by "g" made "g" the
-        default). When the serving is being edited and the recipe has several
-        non-fixed measures, which one to edit is ambiguous, so that's refused.
+        Not the default measure: logging a recipe with another measure makes
+        that one the default (seen live: logging by "g" made "g" the default).
+        With several non-fixed measures, which one is the serving is
+        ambiguous, so that's refused whatever the default is.
         """
-        measures = food.get("measures") or []
-        servings = [m for m in measures if not _is_fixed_recipe_measure(m["name"])]
-        if editing and len(servings) > 1:
+        servings = cls._recipe_servings(food)
+        if len(servings) > 1:
             raise CronometerError(
-                f"Recipe {food.get('id')} has several servings "
+                f"Recipe {food['id']} has several servings "
                 f"{[m['name'] for m in servings]}, so it's ambiguous which one to "
                 f"edit; change it in the Cronometer app"
             )
-        default = next(
-            (m for m in measures if m.get("id") == food.get("defaultMeasureId")), None
-        )
-        if default is not None and not _is_fixed_recipe_measure(default["name"]):
-            return default
-        if len(servings) != 1:
+        if not servings:
             raise CronometerError(
-                f"Can't tell which measure is recipe {food.get('id')}'s serving: "
-                f"default is {(default or {}).get('name')!r} and there are "
-                f"{len(servings)} other candidates {[m['name'] for m in servings]}"
+                f"Recipe {food['id']} has no serving measure (only g, oz and "
+                f"full recipe); add one in the Cronometer app"
             )
         return servings[0]
 
@@ -1206,7 +1213,7 @@ class CronometerClient:
             if (
                 serving["name"] == name
                 and math.isclose(serving["amount"], quantity)
-                and math.isclose(serving["value"], grams)
+                and math.isclose(serving["value"], grams, rel_tol=0, abs_tol=_GRAMS_TOL)
             ):
                 _check_derived_nutrients(food)
                 return food, serving
@@ -1249,15 +1256,22 @@ class CronometerClient:
         The food id and measure ids survive (verified live). Only fields passed
         change. `ingredients` (create_recipe's tuple form) replaces the whole
         list; the server re-derives nutrients and the "full recipe" weight from
-        it. serving_name is stored exactly as given; the serving keeps its
-        weight and quantity unless serving_grams / serving_quantity are passed;
-        servings_per_batch sizes it from the (new) batch instead, which keeps a
-        "serving (1/N batch)" at 1/N. Unlike update_custom_food, resizing keeps the quantity: recipe servings
-        are always created with an explicit quantity, so there is no "400 g"
-        style measure whose quantity is really a gram count (#66) to reset.
+        it.
+
+        The serving (the recipe's one non-fixed measure) is only touched when a
+        serving field is passed, or when new ingredients change the batch
+        weight. serving_name is stored exactly as given; serving_grams /
+        serving_quantity set the weight and quantity; servings_per_batch sizes
+        it from the (new) batch, which keeps a "serving (1/N batch)" at 1/N.
+        Changing the batch weight without serving_grams or servings_per_batch
+        is refused rather than letting the fraction drift. Unlike
+        update_custom_food, resizing keeps the quantity: recipe servings are
+        always created with an explicit quantity, so there is no "400 g" style
+        measure whose quantity is really a gram count (#66) to reset.
         Serving-based recipes ("Recipe"-type measures) are refused.
 
-        Returns the batch weight and the serving as read back.
+        Returns the batch weight, plus the serving as read back when it was
+        resolved.
         """
         if all(
             v is None
@@ -1277,78 +1291,93 @@ class CronometerClient:
 
         if serving_name is not None:
             serving_name = _recipe_serving_name(serving_name)
-        if serving_quantity is not None:
-            _check_positive("serving_quantity", serving_quantity)
-        _resolve_serving_grams(serving_grams, servings_per_batch, 1.0)  # validate
+        _check_serving_args(serving_grams, servings_per_batch, serving_quantity)
         _check_name(name)
+        resizing = serving_grams is not None or servings_per_batch is not None
+        serving_edit = (
+            resizing or serving_name is not None or serving_quantity is not None
+        )
 
         with self._food_lock(food_id):
             food = self._get_user_food(food_id, recipe=True)
-            serving = self._recipe_serving(
-                food,
-                editing=any(
-                    v is not None
-                    for v in (
-                        serving_name,
-                        serving_grams,
-                        servings_per_batch,
-                        serving_quantity,
-                    )
-                ),
-            )
-            servings_before = _ingredient_grams(food) / serving["value"]
+            batch_before = _ingredient_grams(food)
 
             self._rename(food, name)
             if comments is not None:
                 food["comments"] = comments
-            if serving_name is not None:
-                serving["name"] = serving_name
-            if serving_quantity is not None:
-                serving["amount"] = serving_quantity
             if parsed is not None:
                 food["ingredients"] = self._ingredient_rows(parsed)
-            total_grams = _ingredient_grams(food)
-            new_grams = _resolve_serving_grams(
-                serving_grams, servings_per_batch, total_grams
-            )
-            if new_grams is not None:
-                serving["value"] = new_grams
-            _check_serving_fits(serving["value"], total_grams)
+            batch_grams = _ingredient_grams(food)
+            batch_changed = abs(batch_grams - batch_before) > _GRAMS_TOL
+
+            # The serving is only looked at when it's edited, or when the batch
+            # weight changes under it. Other edits work whatever its state.
+            serving = None
+            if serving_edit or (batch_changed and self._recipe_servings(food)):
+                serving = self._recipe_serving(food)
+                servings_before = batch_before / serving["value"]
+                if batch_changed and not resizing:
+                    raise ValueError(
+                        f"These ingredients change recipe {food_id}'s batch from "
+                        f"{batch_before:g} g to {batch_grams:g} g, so its serving "
+                        f"{serving['name']!r} ({serving['value']:g} g) would "
+                        f"become {batch_grams / serving['value']:.3g} per batch "
+                        f"instead of {servings_before:.3g}. Pass "
+                        f"servings_per_batch=N to keep the fraction, or "
+                        f"serving_grams={serving['value']:g} to keep the weight"
+                    )
+                if serving_name is not None:
+                    serving["name"] = serving_name
+                if serving_quantity is not None:
+                    serving["amount"] = serving_quantity
+                if servings_per_batch is not None:
+                    serving["value"] = _serving_fraction(
+                        batch_grams, servings_per_batch
+                    )
+                elif serving_grams is not None:
+                    serving["value"] = serving_grams
+                _check_serving_fits(serving["value"], batch_grams)
             # Sent empty so the read-back proves the server derived them anew.
             food["nutrients"] = []
 
             self._save_food(food)
-            food, serving = self._settle_recipe_serving(
-                self.get_food(food_id),
-                serving["id"],
-                serving["name"],
-                serving["amount"],
-                serving["value"],
-            )
+            if serving is None:
+                food = self.get_food(food_id)
+                _check_derived_nutrients(food)
+            else:
+                food, serving = self._settle_recipe_serving(
+                    self.get_food(food_id),
+                    serving["id"],
+                    serving["name"],
+                    serving["amount"],
+                    serving["value"],
+                )
 
         logger.info(
             "Updated recipe %r (id=%d, %d ingredients, %.1fg batch)",
             food["name"],
             food_id,
             len(food["ingredients"]),
-            total_grams,
+            batch_grams,
         )
-        return {
+        result = {
             "food_id": food_id,
             "name": food["name"],
-            "total_grams": total_grams,
+            "total_grams": batch_grams,
             "ingredient_count": len(food["ingredients"]),
-            "servings_per_batch": {
+        }
+        if serving is not None:
+            result["servings_per_batch"] = {
                 "before": round(servings_before, 3),
-                "after": round(total_grams / serving["value"], 3),
-            },
-            "serving": {
+                "after": round(batch_grams / serving["value"], 3),
+            }
+            result["serving"] = {
                 "measure_id": serving["id"],
                 "name": serving["name"],
                 "quantity": serving["amount"],
                 "grams": serving["value"],
-            },
-        }
+            }
+        return result
 
     def _ingredient_rows(
         self, parsed: list[tuple[int, float, int | None]]
@@ -2273,18 +2302,25 @@ def _ingredient_grams(food: dict) -> float:
     return sum(i["grams"] for i in food["ingredients"])
 
 
-def _resolve_serving_grams(
-    serving_grams: float | None, servings_per_batch: float | None, batch_grams: float
-) -> float | None:
-    """Serving weight from serving_grams or servings_per_batch (not both)."""
+def _check_serving_args(
+    serving_grams: float | None,
+    servings_per_batch: float | None,
+    serving_quantity: float | None,
+) -> None:
+    """The serving arguments' own checks, before anything is read or sent."""
     if serving_grams is not None and servings_per_batch is not None:
         raise ValueError("Pass serving_grams or servings_per_batch, not both")
-    if servings_per_batch is not None:
-        _check_positive("servings_per_batch", servings_per_batch)
-        return batch_grams / servings_per_batch
-    if serving_grams is not None:
-        _check_positive("serving_grams", serving_grams)
-    return serving_grams
+    for label, v in (
+        ("serving_grams", serving_grams),
+        ("servings_per_batch", servings_per_batch),
+        ("serving_quantity", serving_quantity),
+    ):
+        if v is not None:
+            _check_positive(label, v)
+
+
+def _serving_fraction(batch_grams: float, servings_per_batch: float) -> float:
+    return round(batch_grams / servings_per_batch, _GRAMS_DECIMALS)
 
 
 def _gram_measure_id(food: dict) -> int:
