@@ -951,7 +951,9 @@ def delete_custom_food(food_id: int) -> str:
     The API has no hard delete. The food drops out of search after a few
     seconds; diary entries that already use it are kept, and
     get_food_details can still read it by ID (flagged "retired"). Database
-    foods (USDA, NCCDB, CRDB, ...) cannot be deleted.
+    foods (USDA, NCCDB, CRDB, ...) cannot be deleted, and neither can
+    serving-based recipes (made in the app with "Recipe"-type measures):
+    re-sending one through the API is untested, so delete those in the app.
 
     Args:
         food_id: ID of the custom food or recipe to delete.
@@ -996,6 +998,7 @@ def add_recipe(
     ingredients: list[dict],
     serving_name: str = "Serving",
     serving_grams: float | None = None,
+    servings_per_batch: float | None = None,
     serving_quantity: float = 1.0,
     comments: str | None = None,
 ) -> str:
@@ -1019,6 +1022,8 @@ def add_recipe(
             ("2 bowls") is refused: pass serving_quantity=2, serving_name="bowls".
         serving_grams: Grams in one serving, at most the batch weight. Defaults
             to the full batch weight (one serving = the whole recipe).
+        servings_per_batch: Instead of serving_grams, make the serving this
+            fraction of the batch, e.g. 6 for "serving (1/6 batch)".
         serving_quantity: How many units the serving is (default 1); the app
             shows "<quantity> <serving_name>", e.g. 1.5 with "cups".
         comments: Free-text recipe notes.
@@ -1031,6 +1036,7 @@ def add_recipe(
             ingredients=parsed,
             serving_name=serving_name,
             serving_grams=serving_grams,
+            servings_per_batch=servings_per_batch,
             serving_quantity=serving_quantity,
             comments=comments,
         )
@@ -1057,6 +1063,7 @@ def update_recipe(
     name: str | None = None,
     serving_name: str | None = None,
     serving_grams: float | None = None,
+    servings_per_batch: float | None = None,
     serving_quantity: float | None = None,
     comments: str | None = None,
 ) -> str:
@@ -1074,12 +1081,8 @@ def update_recipe(
             [{"food_id": int, "grams": float, "measure_id"?: int}] form. It
             replaces the old list entirely: to change one ingredient, read the
             current list with get_food_details and send it all back with that
-            change. The serving keeps its weight unless you also pass
-            serving_grams. So a fraction-of-batch serving such as
-            "serving (1/6 batch)" stops being 1/6 when the batch weight
-            changes: pass serving_grams = new batch grams / 6 with the new
-            ingredients. The result's servings_per_batch (before/after)
-            shows whether the fraction held.
+            change. To keep a "serving (1/N batch)" at 1/N, also pass
+            servings_per_batch=N.
         name: New recipe name.
         serving_name: New name for the recipe's serving, stored exactly as
             given, e.g. "serving (1/6 batch)". Its quantity and weight are
@@ -1087,6 +1090,8 @@ def update_recipe(
             and a name starting with a quantity ("2 bowls") is refused.
         serving_grams: New weight of the serving in grams, at most the batch
             weight. Unlike update_custom_food, this keeps the quantity.
+        servings_per_batch: Instead of serving_grams, make the serving this
+            fraction of the (new) batch: batch grams / servings_per_batch.
         serving_quantity: How many units the serving is; the app shows
             "<quantity> <serving_name>", e.g. 1.5 with "cups".
         comments: New recipe notes ("" clears them).
@@ -1100,6 +1105,7 @@ def update_recipe(
             name=name,
             serving_name=serving_name,
             serving_grams=serving_grams,
+            servings_per_batch=servings_per_batch,
             serving_quantity=serving_quantity,
             comments=comments,
         )

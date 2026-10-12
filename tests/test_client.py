@@ -186,9 +186,9 @@ class FakeFoodServer:
     add_food upserts like the real endpoint: new foods and measures get ids,
     the first measure becomes the default, new measure names are re-parsed
     (server_reparse), and a recipe's "full recipe" weight and per-100g
-    nutrients are derived from its ingredients (derive_nutrients=False
-    simulates a save that derived nothing). `save_responses` replaces the
-    next add_food answers.
+    nutrients are derived from its ingredients (derive_nutrients=False keeps
+    whatever nutrients were sent, simulating a save that derived nothing).
+    `save_responses` replaces the next add_food answers.
     """
 
     def __init__(
@@ -250,17 +250,17 @@ class FakeFoodServer:
             for m in food["measures"]:
                 if m["name"] == "full recipe":
                     m["value"] = batch
-            totals: dict[int, float] = {}
             if self.derive_nutrients:
+                totals: dict[int, float] = {}
                 for i in food["ingredients"]:
                     for n in self.ingredient_foods[i["foodId"]]["nutrients"]:
                         totals[n["id"]] = (
                             totals.get(n["id"], 0) + n["amount"] * i["grams"] / 100
                         )
-            food["nutrients"] = [
-                {"id": nid, "amount": amount * 100 / batch}
-                for nid, amount in sorted(totals.items())
-            ]
+                food["nutrients"] = [
+                    {"id": nid, "amount": amount * 100 / batch}
+                    for nid, amount in sorted(totals.items())
+                ]
         self.foods[food["id"]] = food
         return {"result": "SUCCESS", "messages": [], "id": food["id"]}
 

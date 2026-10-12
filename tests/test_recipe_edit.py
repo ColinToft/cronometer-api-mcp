@@ -203,8 +203,9 @@ def test_rename_resends_recipe_unchanged_apart_from_name(tmp_path):
     assert data["name"] == "Renamed"
     assert [t["name"] for t in data["translations"]] == ["Renamed"]
     assert "messages" not in data
-    expected = without(recipe(), "messages", "name", "translations")
-    assert without(data, "name", "translations") == expected
+    expected = without(recipe(), "messages", "name", "translations", "nutrients")
+    assert without(data, "name", "translations", "nutrients") == expected
+    assert data["nutrients"] == []  # the server must derive them anew
     assert result == {
         "food_id": RECIPE_ID,
         "name": "Renamed",
@@ -243,7 +244,9 @@ def test_comments_set_or_cleared(tmp_path, comments):
 
     data = saved(state)
     assert data["comments"] == comments
-    assert without(data, "comments") == without(recipe(), "messages", "comments")
+    assert without(data, "comments", "nutrients") == without(
+        recipe(), "messages", "comments", "nutrients"
+    )
 
 
 def test_comments_none_keeps_existing(tmp_path):
@@ -274,7 +277,7 @@ def test_serving_grams_resizes_default_measure_only(tmp_path):
     for mid in (313167828, 313167827, 313167826):
         assert by_id[mid] == measures_by_id(recipe())[mid]
     assert data["defaultMeasureId"] == 313167825
-    assert data["nutrients"] == recipe()["nutrients"]
+    assert data["nutrients"] == []
     assert data["ingredients"] == recipe()["ingredients"]
     assert result["serving"]["grams"] == 50.5
 
@@ -467,7 +470,10 @@ def test_ingredients_replace_list_leaving_derivation_to_server(tmp_path):
         },
     ]
 
-    assert without(data, "ingredients") == without(recipe(), "messages", "ingredients")
+    assert without(data, "ingredients", "nutrients") == without(
+        recipe(), "messages", "ingredients", "nutrients"
+    )
+    assert data["nutrients"] == []
     assert result["total_grams"] == 216.0
     assert result["ingredient_count"] == 3
     assert result["serving"]["grams"] == 76
@@ -805,30 +811,6 @@ def test_create_recipe_rejects_non_finite_grams(tmp_path, grams):
     assert state["endpoints"] == []
 
 
-class OddWeightServer(FakeFoodServer):
-    """Derives a batch weight the client could not have computed."""
-
-    def _save(self, food):
-        resp = super()._save(food)
-        for m in self.foods[food["id"]]["measures"]:
-            if m["name"] == "full recipe":
-                m["value"] = 999
-        return resp
-
-
-def test_update_reports_the_servers_batch_weight(tmp_path):
-    client, _ = recipe_client(tmp_path, server_cls=OddWeightServer)
-
-    assert client.update_recipe(RECIPE_ID, name="X")["total_grams"] == 999
-
-
-def test_create_reports_the_servers_batch_weight(tmp_path):
-    srv = OddWeightServer(ingredient_foods=[EGG])
-    client, _ = make_server_client(tmp_path, srv)
-
-    assert client.create_recipe("R", ingredients=[(1234, 100)])["total_grams"] == 999
-
-
 # ---------------------------------------------------------------------------
 # Serving names the server re-parses on create
 # ---------------------------------------------------------------------------
@@ -912,8 +894,8 @@ def test_create_recipe_raises_if_serving_name_wont_stick(tmp_path):
         )
 
     assert state["endpoints"].count("add_food") == 2  # one re-send, then fail
-    assert "Recipe 4242 ('R') was created" in str(err.value)
-    assert "update_recipe(4242" in str(err.value)
+    assert "The recipe exists (id 4242); don't re-create it" in str(err.value)
+    assert "update_recipe" not in str(err.value)
 
 
 def test_create_recipe_read_back_failure_names_the_created_recipe(tmp_path):
@@ -925,7 +907,10 @@ def test_create_recipe_read_back_failure_names_the_created_recipe(tmp_path):
 
     client, state = make_server_client(tmp_path, LostServer(ingredient_foods=[EGG]))
 
-    with pytest.raises(CronometerError, match=r"Recipe 4242 \('R'\) was created.*boom"):
+    with pytest.raises(
+        CronometerError,
+        match=r"Recipe 'R' was created.*boom.*exists \(id 4242\); don't re-create",
+    ):
         client.create_recipe("R", ingredients=[(1234, 100)])
 
     assert state["endpoints"].count("add_food") == 1
@@ -1043,6 +1028,7 @@ def test_update_recipe_tool_converts_ingredients(fake_client):
                 "name": None,
                 "serving_name": None,
                 "serving_grams": 50,
+                "servings_per_batch": None,
                 "serving_quantity": None,
                 "comments": None,
             },
@@ -1129,7 +1115,23 @@ def test_get_food_details_plain_food_has_no_recipe_fields(monkeypatch):
 # Leading quantities, derived nutrients, serving weight
 # ---------------------------------------------------------------------------
 
-LEADING_QUANTITY_NAMES = ["2 bowls", "1.5 cups", "1/2 cup", "1 1/2 cups", "  3 plates"]
+LEADING_QUANTITY_NAMES = [
+    "2 bowls",
+    "1.5 cups",
+    "1/2 cup",
+    "1 1/2 cups",
+    "  3 plates",
+    "½ cup",
+    "1½ cups",
+    ".5 cup",
+    "2x bowls",
+    "2-3 bowls",
+    "1,5 cups",
+    "2",
+    "⅓ batch",
+    "⅞ cup",
+    "¼",
+]
 
 
 @pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)
@@ -1154,7 +1156,7 @@ def test_update_recipe_rejects_leading_quantity(tmp_path, serving_name):
 
 
 @pytest.mark.parametrize(
-    "serving_name", ["serving (1/6 batch)", "1/2cup", "bowl of 2", "2x bowl", "½ cup"]
+    "serving_name", ["serving (1/6 batch)", "bowl of 2", "half (½) cup", "serving #2"]
 )
 def test_names_without_a_leading_quantity_are_accepted(tmp_path, serving_name):
     srv = FakeFoodServer(ingredient_foods=[EGG])
@@ -1178,9 +1180,10 @@ def test_create_recipe_raises_when_no_nutrients_were_derived(tmp_path):
         client.create_recipe("R", ingredients=[(1234, 100)])
 
     msg = str(err.value)
-    assert "Recipe 4242 ('R') was created" in msg
+    assert "Recipe 'R' was created" in msg
     assert "returned no derived nutrients" in msg
-    assert "check its ingredients in the Cronometer app" in msg
+    assert "The recipe exists (id 4242); don't re-create it" in msg
+    assert "Check its ingredients in the Cronometer app" in msg
     assert "update_recipe" not in msg
     assert state["endpoints"].count("add_food") == 1
     assert list(srv.foods) == [4242]  # exactly one recipe created
@@ -1197,8 +1200,9 @@ def test_create_recipe_post_create_failure_names_the_one_recipe(tmp_path):
         )
 
     msg = str(err.value)
-    assert "Recipe 4242 ('R') was created" in msg
-    assert "update_recipe(4242, ...) rather than creating it again" in msg
+    assert "Recipe 'R' was created" in msg
+    assert "The recipe exists (id 4242); don't re-create it" in msg
+    assert "update_recipe" not in msg  # it goes through the same settle
     assert not isinstance(err.value, RecipeNotDerivedError)
     assert list(srv.foods) == [4242]  # the re-send edited it, nothing new
     assert state["endpoints"].count("add_food") == 2
@@ -1332,3 +1336,90 @@ def test_update_recipe_rejects_ingredients_that_shrink_below_serving(tmp_path):
         client.update_recipe(RECIPE_ID, ingredients=[(1234, 50)])
 
     assert "add_food" not in endpoints(state)
+
+
+# ---------------------------------------------------------------------------
+# servings_per_batch
+# ---------------------------------------------------------------------------
+
+
+def test_create_recipe_servings_per_batch_sizes_the_serving(tmp_path):
+    srv = FakeFoodServer(ingredient_foods=[EGG, BANANA])
+    client, _ = make_server_client(tmp_path, srv)
+
+    result = client.create_recipe(
+        "R",
+        ingredients=[(1234, 300), (450856, 180)],
+        serving_name="serving (1/8 batch)",
+        servings_per_batch=8,
+    )
+
+    assert result["serving_grams"] == 60
+    m = measures_by_id(srv.foods[result["food_id"]])[result["measure_id"]]
+    assert (m["name"], m["amount"], m["value"]) == ("serving (1/8 batch)", 1.0, 60)
+
+
+def test_update_recipe_servings_per_batch_keeps_the_fraction(tmp_path):
+    """Colin's "serving (1/N batch)": new ingredients, still 1/N."""
+    client, state = recipe_client(tmp_path)
+
+    result = client.update_recipe(
+        RECIPE_ID, ingredients=[(1234, 400)], servings_per_batch=8
+    )
+
+    assert measures_by_id(saved(state))[313167825]["value"] == 50
+    assert result["servings_per_batch"] == {"before": 2.0, "after": 8.0}
+    assert result["serving"]["grams"] == 50
+
+
+def test_update_recipe_servings_per_batch_without_new_ingredients(tmp_path):
+    client, state = recipe_client(tmp_path)
+
+    client.update_recipe(RECIPE_ID, servings_per_batch=4)
+
+    assert measures_by_id(saved(state))[313167825]["value"] == 38  # 152 / 4
+
+
+@pytest.mark.parametrize("value", [0, -2, math.nan, math.inf])
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_servings_per_batch_must_be_positive_and_finite(tmp_path, value, action):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="servings_per_batch"):
+        if action == "create":
+            client.create_recipe(
+                "R", ingredients=[(1234, 100)], servings_per_batch=value
+            )
+        else:
+            client.update_recipe(RECIPE_ID, servings_per_batch=value)
+
+    assert state["endpoints"] == []
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_serving_grams_and_servings_per_batch_are_exclusive(tmp_path, action):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="not both"):
+        if action == "create":
+            client.create_recipe(
+                "R", ingredients=[(1234, 100)], serving_grams=10, servings_per_batch=2
+            )
+        else:
+            client.update_recipe(RECIPE_ID, serving_grams=10, servings_per_batch=2)
+
+    assert state["endpoints"] == []
+
+
+def test_servings_per_batch_below_one_is_heavier_than_the_batch(tmp_path):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="more than the whole batch"):
+        client.update_recipe(RECIPE_ID, servings_per_batch=0.5)
+
+    assert "add_food" not in endpoints(state)
+
+
+def test_tools_pass_servings_per_batch_through(fake_client):
+    server.update_recipe(7, servings_per_batch=6)
+    assert fake_client.calls[0][2]["servings_per_batch"] == 6
