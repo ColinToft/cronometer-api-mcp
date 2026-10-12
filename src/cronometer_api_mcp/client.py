@@ -90,7 +90,12 @@ _RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
 # (including the derived/negative-ID duplicates it sends alongside them).
 # extra_nutrients must not reuse one of these -- see create_custom_food().
 # A serving name that leads with a plain number, e.g. "2 cookies".
-_QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
+_QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?|\d+/\d+)\s+(\S.*)$")
+
+# Measure names whose quantity counts a unit ("400 g"), not portions.
+_UNIT_COUNT_MEASURES = frozenset(
+    {"g", "gram", "grams", "kg", "oz", "ounce", "ounces", "lb", "lbs", "ml"}
+)
 
 _RESERVED_CUSTOM_FOOD_NUTRIENT_IDS = frozenset(
     {
@@ -857,12 +862,12 @@ class CronometerClient:
 
         A measure is `amount` units of `name` weighing `value` grams in total,
         and the app renders the serving as "<amount> <name>". Any serving edit
-        makes the measure a named ("Atomic") serving. A new serving_name sets
-        the quantity: its leading number ("2 cookies"), else
-        serving_quantity, else 1 (see _apply_serving). Setting the weight
-        without a name or quantity also resets the quantity to 1, otherwise a
-        food first saved as "400 g" keeps amount=400 and shows up as
-        "400 <serving_name>". A quantity set without serving_grams keeps the
+        makes the measure a named ("Atomic") serving. The quantity comes from
+        serving_quantity, else a number leading serving_name ("2 cookies",
+        "1/2 cup"). Without either, setting the weight resets it to 1 (a food
+        first saved as "400 g" would otherwise show as "400 <name>"), and a
+        bare rename keeps it, except on a unit-count measure like "400 g"
+        (see _apply_serving). A quantity set without serving_grams keeps the
         total weight, so the per-unit weight changes.
 
         Returns {"food_id": int, "name": str}.
@@ -898,8 +903,8 @@ class CronometerClient:
                 v is not None for v in (serving_name, serving_grams, serving_quantity)
             ):
                 quantity = serving_quantity
-                if quantity is None and serving_name is None:
-                    quantity = 1.0  # a resize alone resets "400 g"-style measures
+                if quantity is None and serving_grams is not None:
+                    quantity = 1.0  # a new weight is one serving (see above)
                 _apply_serving(measure, serving_name, serving_grams, quantity)
                 measure["type"] = "Atomic"
             grams = (measure or {}).get("value") or 100.0
@@ -1018,7 +1023,10 @@ class CronometerClient:
         server derived it), "ingredient_count"}.
         """
         parsed = _parse_recipe_ingredients(ingredients)
+        _check_name(name)
         serving_name, quantity = _parse_recipe_serving_name(serving_name)
+        if quantity is None:
+            quantity = 1.0
         if serving_grams is not None:
             _check_positive("serving_grams", serving_grams)
         ingredient_rows = self._ingredient_rows(parsed)
@@ -1079,13 +1087,20 @@ class CronometerClient:
             raise CronometerError(f"Failed to create recipe: {data}")
 
         # The first measure becomes the default, which identifies the serving.
-        with self._food_lock(food_id):
-            food = self.get_food(food_id)
-            measure_id = food.get("defaultMeasureId")
-            food, serving = self._settle_recipe_serving(
-                food, measure_id, serving_name, quantity
-            )
-        total_grams = _full_recipe_grams(food)
+        try:
+            with self._food_lock(food_id):
+                food = self.get_food(food_id)
+                measure_id = food.get("defaultMeasureId")
+                food, serving = self._settle_recipe_serving(
+                    food, measure_id, serving_name, quantity
+                )
+            total_grams = _full_recipe_grams(food)
+        except Exception as e:
+            raise CronometerError(
+                f"Recipe {food_id} ({name!r}) was created, but checking its "
+                f"serving failed: {e}. The recipe exists; fix it with "
+                f"update_recipe({food_id}, ...) rather than creating it again."
+            ) from e
         logger.info(
             "Created recipe %r (id=%d, %d ingredients, %.1fg batch)",
             name,
@@ -1178,6 +1193,7 @@ class CronometerClient:
         name: str | None = None,
         serving_name: str | None = None,
         serving_grams: float | None = None,
+        serving_quantity: float | None = None,
         comments: str | None = None,
     ) -> dict:
         """Edit a user-created recipe in place via the add_food upsert.
@@ -1185,26 +1201,40 @@ class CronometerClient:
         The food id and measure ids survive (verified live). Only fields passed
         change. `ingredients` (create_recipe's tuple form) replaces the whole
         list; the server re-derives nutrients and the "full recipe" weight from
-        it. The serving keeps its weight unless serving_grams is passed. A new
-        serving_name sets the quantity: its leading number ("2 bowls" ->
-        amount 2, type kept "Weight", as the server stores a new "2 bowls"),
-        else 1. Serving-based recipes ("Recipe"-type measures) are refused.
+        it. The serving keeps its weight unless serving_grams is passed, and
+        its quantity unless serving_quantity or a number leading serving_name
+        is given ("2 bowls" -> amount 2, type kept "Weight", as the server
+        stores a new "2 bowls"); see _apply_serving for bare renames.
+        Serving-based recipes ("Recipe"-type measures) are refused.
 
         Returns the server's read-back of the batch weight and serving.
         """
         if all(
             v is None
-            for v in (ingredients, name, serving_name, serving_grams, comments)
+            for v in (
+                ingredients,
+                name,
+                serving_name,
+                serving_grams,
+                serving_quantity,
+                comments,
+            )
         ):
             raise ValueError("update_recipe needs at least one field to change")
 
         parsed = None if ingredients is None else _parse_recipe_ingredients(ingredients)
 
-        quantity = None
+        quantity = serving_quantity
         if serving_name is not None:
-            serving_name, quantity = _parse_recipe_serving_name(serving_name)
-        if serving_grams is not None:
-            _check_positive("serving_grams", serving_grams)
+            serving_name, led_quantity = _parse_recipe_serving_name(serving_name)
+            if quantity is None:
+                quantity = led_quantity
+        for label, v in (
+            ("serving_grams", serving_grams),
+            ("serving_quantity", quantity),
+        ):
+            if v is not None:
+                _check_positive(label, v)
         _check_name(name)
 
         with self._food_lock(food_id):
@@ -1316,7 +1346,8 @@ class CronometerClient:
             timeout: Give up after this many seconds of polling.
 
         Returns "recipe_name", "ingredients" (usable matches), and "unmatched".
-        When save=True, also create_recipe's "food_id", "total_grams", and
+        When save=True, also create_recipe's "food_id", "measure_id",
+        "total_grams", and
         "ingredient_count".
         """
         if not ingredients_text or not ingredients_text.strip():
@@ -2104,19 +2135,24 @@ def _is_fixed_recipe_measure(name: str) -> bool:
 
 
 def _split_quantity_led_name(name: str) -> tuple[str, float | None]:
-    """Split "2 bowls" into ("bowls", 2.0); other names get quantity None.
+    """Split a leading quantity off a serving name; other names get None.
 
-    The server does this when it creates a measure but not when an existing
-    one is re-sent, so edits do it themselves. A leading number that is not
-    positive ("0 calorie syrup") stays part of the name; one that overflows a
-    float is an error.
+    Matches the server's rule for a leading quantity on a new measure: an
+    integer, decimal, or n/d followed by a space ("2 bowls" -> ("bowls", 2),
+    "1/2 cup" -> ("cup", 0.5)). It doesn't do this when an existing measure
+    is re-sent, so edits do it themselves. A leading number that is not
+    positive ("0 calorie syrup", "0/2 cup") stays part of the name; one that
+    overflows a float is an error.
     """
     if not name.strip():
         raise ValueError("serving_name must not be empty")
     led = _QUANTITY_LED_NAME.match(name)
     if not led:
         return name, None
-    quantity = float(led.group(1))
+    num, _, den = led.group(1).partition("/")
+    if den and int(den) == 0:
+        return name, None
+    quantity = float(num) / int(den) if den else float(num)
     if not math.isfinite(quantity):
         raise ValueError(
             f"serving_name quantity must be a finite number, got {led.group(1)!r}"
@@ -2126,15 +2162,15 @@ def _split_quantity_led_name(name: str) -> tuple[str, float | None]:
     return led.group(2), quantity
 
 
-def _parse_recipe_serving_name(name: str) -> tuple[str, float]:
-    """A recipe serving's (name, quantity); built-in measure names are refused."""
+def _parse_recipe_serving_name(name: str) -> tuple[str, float | None]:
+    """_split_quantity_led_name, refusing the built-in recipe measure names."""
     name, quantity = _split_quantity_led_name(name)
     if _is_fixed_recipe_measure(name):
         raise ValueError(
             f"serving_name {name!r} is reserved for one of the recipe's "
             f"built-in measures (g, oz, full recipe)"
         )
-    return name, 1.0 if quantity is None else quantity
+    return name, quantity
 
 
 def _apply_serving(
@@ -2142,15 +2178,19 @@ def _apply_serving(
 ) -> None:
     """Rename / resize a serving measure in place (name already split).
 
-    A new name always sets the quantity: `quantity`, else 1, so renaming
-    "2 bowls" to "cups" gives "1 cups" at the same weight. Grams change only
-    the weight; a quantity alone changes only the quantity.
+    A bare rename keeps the portion count ("2 cookies" -> "2 biscuits"),
+    except on a unit-count measure like "400 g", whose quantity is grams, not
+    portions: that resets to 1. An explicit quantity always wins; grams
+    change only the weight.
     """
+    if quantity is not None:
+        measure["amount"] = quantity
+    elif name is not None and (
+        measure["name"].strip().casefold() in _UNIT_COUNT_MEASURES
+    ):
+        measure["amount"] = 1.0
     if name is not None:
         measure["name"] = name
-        measure["amount"] = 1.0 if quantity is None else quantity
-    elif quantity is not None:
-        measure["amount"] = quantity
     if grams is not None:
         measure["value"] = grams
 

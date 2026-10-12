@@ -269,12 +269,13 @@ def test_update_custom_food_serving_size_in_diary(
         ("10 pieces", {}, "pieces", 10.0),
         ("1.5 cups", {}, "cups", 1.5),
         ("2 cookies", {"serving_quantity": 3}, "cookies", 3),
-        # Fractions are not split client-side: a re-sent existing measure is
-        # stored verbatim (the server re-parses only measures it creates).
-        ("1/2 cup", {"serving_grams": 120}, "1/2 cup", 1.0),
+        # A leading fraction is a quantity too, as for the server's own create.
+        ("1/2 cup", {"serving_grams": 120}, "cup", 0.5),
+        ("3/4 cups", {}, "cups", 0.75),
         # A non-positive leading number is part of the name.
         ("0 calorie syrup", {"serving_grams": 15}, "0 calorie syrup", 1.0),
-        ("0.0 cups", {}, "0.0 cups", 1.0),
+        ("0.0 cups", {"serving_grams": 10}, "0.0 cups", 1.0),
+        ("0/2 cup", {"serving_grams": 10}, "0/2 cup", 1.0),
     ],
 )
 def test_update_custom_food_quantity_led_serving_name(
@@ -294,20 +295,37 @@ def test_update_custom_food_quantity_led_serving_name(
     )
 
 
-def test_update_custom_food_bare_serving_name_means_quantity_one(tmp_path):
-    """Same rule as update_recipe: renaming "2 bowls" to "cups" gives
-    "1 cups" at the same weight."""
+def test_update_custom_food_bare_rename_keeps_quantity(tmp_path):
+    """Same rule as update_recipe: "2 cookies" renamed to "biscuits" gives
+    "2 biscuits" at the same weight."""
     food = custom_food()
-    food["measures"][0].update(name="bowls", amount=2, value=300)
+    food["measures"][0].update(name="cookies", amount=2, value=30)
     client, state = make_cold_client(tmp_path, [food, OK])
 
-    client.update_custom_food(FOOD_ID, serving_name="cups")
+    client.update_custom_food(FOOD_ID, serving_name="biscuits")
 
     (measure,) = state["payloads"][1]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"], measure["type"]) == (
-        "cups",
+        "biscuits",
+        2,
+        30,
+        "Atomic",
+    )
+
+
+def test_update_custom_food_bare_rename_of_unit_count_resets_quantity(tmp_path):
+    """A food saved as "400 g" counts grams, not portions."""
+    food = custom_food()
+    food["measures"][0].update(name="g", amount=400, value=400, type="Weight")
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, serving_name="portion")
+
+    (measure,) = state["payloads"][1]["data"]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"], measure["type"]) == (
+        "portion",
         1.0,
-        300,
+        400,
         "Atomic",
     )
 

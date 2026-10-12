@@ -910,8 +910,9 @@ def update_custom_food(
             an ID the named args already cover.
         serving_name: New name for the default serving. The app shows the
             serving as "<quantity> <name>"; a leading number ("2 cookies")
-            is taken as the quantity, and a bare name means quantity 1
-            unless serving_quantity is passed. The weight is unchanged.
+            or "1/2 cup" is taken as the quantity; a bare name keeps the
+            current quantity, except that a unit count like "400 g" resets
+            to 1. The weight is unchanged.
         serving_grams: New total weight of the default serving in grams.
             Also resets the quantity to serving_quantity (or 1).
         serving_quantity: How many units make up the default serving
@@ -1014,9 +1015,9 @@ def add_recipe(
             ingredient. An optional "measure_id" overrides the unit shown in
             Cronometer's UI; "grams" always drives the nutrition math.
         serving_name: Name of the default serving measure (default "Serving"),
-            stored as written, e.g. "serving (1/6 batch)". A leading number
-            ("2 bowls") becomes the serving's quantity. "g", "oz" and
-            "full recipe" are reserved.
+            stored as written, e.g. "serving (1/6 batch)". A leading quantity
+            ("2 bowls", "1/2 cup") becomes the serving's quantity. "g", "oz"
+            and "full recipe" are reserved.
         serving_grams: Grams in one serving. Defaults to the full batch weight
             (one serving = the whole recipe).
         comments: Free-text recipe notes.
@@ -1053,6 +1054,7 @@ def update_recipe(
     name: str | None = None,
     serving_name: str | None = None,
     serving_grams: float | None = None,
+    serving_quantity: float | None = None,
     comments: str | None = None,
 ) -> str:
     """Edit an existing recipe (one you created) in place.
@@ -1074,10 +1076,13 @@ def update_recipe(
             ones.
         name: New recipe name.
         serving_name: New name for the recipe's serving, stored as written,
-            e.g. "serving (1/6 batch)". A leading number ("2 bowls") becomes
-            the serving's quantity; a bare name means quantity 1. The weight
-            is unchanged. "g", "oz" and "full recipe" are reserved.
+            e.g. "serving (1/6 batch)". A leading quantity ("2 bowls",
+            "1/2 cup") becomes the serving's quantity; a bare name keeps the
+            current quantity. The weight is unchanged. "g", "oz" and
+            "full recipe" are reserved.
         serving_grams: New weight of the serving in grams.
+        serving_quantity: How many units the serving is, e.g. 1 to turn
+            "0.5 batch)" back into "1 serving (1/2 batch)" with serving_name.
         comments: New recipe notes ("" clears them).
     """
     try:
@@ -1089,6 +1094,7 @@ def update_recipe(
             name=name,
             serving_name=serving_name,
             serving_grams=serving_grams,
+            serving_quantity=serving_quantity,
             comments=comments,
         )
         return _ok(result)

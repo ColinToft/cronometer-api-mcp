@@ -290,12 +290,24 @@ def test_serving_name_is_sent_verbatim_and_resets_quantity(tmp_path):
     serving.update(name="batch)", amount=0.5)
     client, state = recipe_client(tmp_path, mangled)
 
-    client.update_recipe(RECIPE_ID, serving_name="serving (1/6 batch)")
+    client.update_recipe(
+        RECIPE_ID, serving_name="serving (1/6 batch)", serving_quantity=1
+    )
 
     m = measures_by_id(saved(state))[313167825]
     assert m["name"] == "serving (1/6 batch)"
-    assert m["amount"] == 1.0
+    assert m["amount"] == 1
     assert m["value"] == 76  # weight untouched
+
+
+def test_bare_rename_keeps_mangled_quantity_without_serving_quantity(tmp_path):
+    mangled = recipe()
+    measures_by_id(mangled)[313167825].update(name="batch)", amount=0.5)
+    client, state = recipe_client(tmp_path, mangled)
+
+    client.update_recipe(RECIPE_ID, serving_name="serving (1/6 batch)")
+
+    assert measures_by_id(saved(state))[313167825]["amount"] == 0.5
 
 
 @pytest.mark.parametrize(
@@ -303,6 +315,8 @@ def test_serving_name_is_sent_verbatim_and_resets_quantity(tmp_path):
     [
         ("2 bowls", "bowls", 2.0),
         ("1.5 cups", "cups", 1.5),
+        ("1/2 cup", "cup", 0.5),
+        ("3/4 batch", "batch", 0.75),
         ("  3   plates", "plates", 3.0),
     ],
 )
@@ -329,22 +343,34 @@ def test_non_positive_leading_number_stays_in_name(tmp_path, serving_name):
     assert (m["name"], m["amount"]) == (serving_name, 1.0)
 
 
-def test_bare_serving_name_means_quantity_one(tmp_path):
-    """Renaming "2 bowls" to "cups" gives "1 cups" at the same weight; the
-    same rule as update_custom_food."""
+def test_bare_rename_keeps_quantity(tmp_path):
+    """Renaming "2 cookies" to "biscuits" gives "2 biscuits" at the same
+    weight; the same rule as update_custom_food."""
     food = recipe()
-    measures_by_id(food)[313167825].update(name="bowls", amount=2)
+    measures_by_id(food)[313167825].update(name="cookies", amount=2)
     client, state = recipe_client(tmp_path, food)
 
-    client.update_recipe(RECIPE_ID, serving_name="cups")
+    client.update_recipe(RECIPE_ID, serving_name="biscuits")
 
     m = measures_by_id(saved(state))[313167825]
     assert (m["name"], m["amount"], m["value"], m["type"]) == (
-        "cups",
-        1.0,
+        "biscuits",
+        2,
         76,
         "Weight",
     )
+
+
+@pytest.mark.parametrize("unit", ["grams", "Ounces", "ml"])
+def test_bare_rename_of_unit_count_measure_resets_quantity(tmp_path, unit):
+    food = recipe()
+    measures_by_id(food)[313167825].update(name=unit, amount=76)
+    client, state = recipe_client(tmp_path, food)
+
+    client.update_recipe(RECIPE_ID, serving_name="portion")
+
+    m = measures_by_id(saved(state))[313167825]
+    assert (m["name"], m["amount"]) == ("portion", 1.0)
 
 
 def test_serving_name_and_grams_together(tmp_path):
@@ -807,10 +833,11 @@ def test_create_reports_the_servers_batch_weight(tmp_path):
         # Kept by the server as sent (verified live).
         ("serving (1/6 batch)", ("serving (1/6 batch)", 1.0), False, None),
         ("half (1/2)", ("half (1/2)", 1.0), False, None),
-        # Re-parsed by the server (live: name "batch)", amount 0.5; "cup",
-        # 0.5), so the client re-sends the existing measure verbatim.
+        # Re-parsed by the server (live: name "batch)", amount 0.5), so the
+        # client re-sends the existing measure verbatim.
         ("serving (1/2 batch)", ("serving (1/2 batch)", 1.0), True, None),
-        ("1/2 cup", ("1/2 cup", 1.0), True, None),
+        # A leading fraction is split client-side, like a leading number.
+        ("1/2 cup", ("cup", 0.5), False, None),
         ("0 calorie syrup", ("0 calorie syrup", 1.0), True, None),
         # Split client-side and sent with its quantity, which the server
         # leaves alone (live: amount != 1 is never re-parsed).
@@ -847,10 +874,39 @@ class StubbornServer(FakeFoodServer):
 def test_create_recipe_raises_if_serving_name_wont_stick(tmp_path):
     client, state = make_server_client(tmp_path, StubbornServer(ingredient_foods=[EGG]))
 
-    with pytest.raises(CronometerError, match="reads back as 'cup'"):
-        client.create_recipe("R", ingredients=[(1234, 100)], serving_name="1/2 cup")
+    with pytest.raises(CronometerError, match="reads back as 'batch\\)'") as err:
+        client.create_recipe(
+            "R", ingredients=[(1234, 100)], serving_name="serving (1/2 batch)"
+        )
 
     assert state["endpoints"].count("add_food") == 2  # one re-send, then fail
+    assert "Recipe 4242 ('R') was created" in str(err.value)
+    assert "update_recipe(4242" in str(err.value)
+
+
+def test_create_recipe_read_back_failure_names_the_created_recipe(tmp_path):
+    class LostServer(FakeFoodServer):
+        def handle(self, endpoint, body):
+            if endpoint == "/api/v2/get_food":
+                raise CronometerError("boom")
+            return super().handle(endpoint, body)
+
+    client, state = make_server_client(tmp_path, LostServer(ingredient_foods=[EGG]))
+
+    with pytest.raises(CronometerError, match=r"Recipe 4242 \('R'\) was created.*boom"):
+        client.create_recipe("R", ingredients=[(1234, 100)])
+
+    assert state["endpoints"].count("add_food") == 1
+
+
+@pytest.mark.parametrize("name", ["", "  "])
+def test_create_recipe_rejects_blank_name(tmp_path, name):
+    client, state = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[EGG]))
+
+    with pytest.raises(ValueError, match="name must not be empty"):
+        client.create_recipe(name, ingredients=[(1234, 100)])
+
+    assert state["endpoints"] == []
 
 
 @pytest.mark.parametrize("serving_name", ["g", "Full Recipe", "1 oz", "  "])
@@ -866,8 +922,8 @@ def test_create_recipe_rejects_reserved_or_blank_serving_names(tmp_path, serving
 def test_update_recipe_resends_serving_if_server_rewrites_it(tmp_path):
     client, state = recipe_client(tmp_path, server_cls=StubbornServer)
 
-    with pytest.raises(CronometerError, match="reads back as 'cup'"):
-        client.update_recipe(RECIPE_ID, serving_name="1/2 cup")
+    with pytest.raises(CronometerError, match="reads back as 'batch\\)'"):
+        client.update_recipe(RECIPE_ID, serving_name="serving (1/2 batch)")
 
     assert state["endpoints"].count("add_food") == 2
 
@@ -931,6 +987,7 @@ def test_update_recipe_tool_converts_ingredients(fake_client):
                 "name": None,
                 "serving_name": None,
                 "serving_grams": 50,
+                "serving_quantity": None,
                 "comments": None,
             },
         )
