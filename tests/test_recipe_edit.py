@@ -1667,3 +1667,32 @@ def test_note_when_serving_grams_change(tmp_path, kwargs, note):
             "Diary entries logged by this serving follow it, so 1 serving is now "
             f"{result['serving']['grams']:g} g; entries logged by g keep their grams."
         )
+
+
+@pytest.mark.parametrize("action", ["create", "update"])
+def test_one_serving_per_batch_fits_a_batch_that_rounds_up(tmp_path, action):
+    """523.3868 g / 1 rounds to 523.39 g, 0.0032 g over the batch: it fits."""
+    ingredients = [(1234, 500), (450856, 23.3868)]
+    if action == "create":
+        srv = FakeFoodServer(ingredient_foods=[EGG, BANANA])
+        client, state = make_server_client(tmp_path, srv)
+        result = client.create_recipe(
+            "R", ingredients=ingredients, servings_per_batch=1
+        )
+        assert result["serving_grams"] == 523.39
+    else:
+        client, state = recipe_client(tmp_path)
+        result = client.update_recipe(
+            RECIPE_ID, ingredients=ingredients, servings_per_batch=1
+        )
+        assert result["serving"]["grams"] == 523.39
+    assert state["endpoints"].count("add_food") == 1
+
+
+def test_serving_more_than_the_tolerance_over_the_batch_is_refused(tmp_path):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="more than the whole batch"):
+        client.update_recipe(RECIPE_ID, serving_grams=152.02)
+
+    assert "add_food" not in endpoints(state)

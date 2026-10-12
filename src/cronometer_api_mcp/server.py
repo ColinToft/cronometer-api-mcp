@@ -1074,11 +1074,13 @@ def update_recipe(
     including on past days, the nutrients per gram update. After a serving
     resize, entries logged by the serving follow it ("1 serving" stays 1
     serving), while entries logged by "g" keep their grams (both verified
-    live). The result has a `note` when the serving's grams change.
-    Only the
+    live). The result has a `note` when the serving's grams change. Only the
     arguments you pass change. Cronometer derives the nutrients and the "full
     recipe" weight from the ingredients. Check the result with
-    get_food_details. Plain custom foods go through update_custom_food.
+    get_food_details. Plain custom foods go through update_custom_food. On a
+    recipe with several named servings, any ingredient edit that changes the
+    batch weight is refused, even with servings_per_batch or serving_grams;
+    do it in the Cronometer app.
 
     Args:
         food_id: ID of the recipe to edit.

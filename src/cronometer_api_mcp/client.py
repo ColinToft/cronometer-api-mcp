@@ -810,7 +810,7 @@ class CronometerClient:
             )
         if food.get("retired") and not allow_retired:
             raise CronometerError(f"{label} has been deleted (retired)")
-        if any(m.get("type") == "Recipe" for m in food.get("measures") or []):
+        if any(m.get("type") == "Recipe" for m in food["measures"]):
             raise CronometerError(
                 f"{label} is a serving-based recipe (measures of type 'Recipe'); "
                 f"only weight-based recipes are supported"
@@ -1154,11 +1154,7 @@ class CronometerClient:
     @staticmethod
     def _recipe_servings(food: dict) -> list[dict]:
         """The recipe's non-fixed measures (anything but g, oz, full recipe)."""
-        return [
-            m
-            for m in food.get("measures") or []
-            if not _is_fixed_recipe_measure(m["name"])
-        ]
+        return [m for m in food["measures"] if not _is_fixed_recipe_measure(m["name"])]
 
     @classmethod
     def _recipe_serving(cls, food: dict) -> dict:
@@ -1265,7 +1261,10 @@ class CronometerClient:
         update_custom_food, resizing keeps the quantity: recipe servings are
         always created with an explicit quantity, so there is no "400 g" style
         measure whose quantity is really a gram count (#66) to reset.
-        Serving-based recipes ("Recipe"-type measures) are refused.
+        Serving-based recipes ("Recipe"-type measures) are refused. On a recipe
+        with several named servings, any ingredient edit that changes the
+        batch weight is refused, even with servings_per_batch or
+        serving_grams; do it in the Cronometer app.
 
         Existing diary entries: the nutrients per gram update. After a resize,
         entries logged by the serving measure follow it, so "1 serving" stays
@@ -2280,7 +2279,8 @@ def _check_serving_fits(serving_grams: float, batch_grams: float) -> None:
     """A serving can't weigh more than the whole batch.
 
     Checked before saving against the ingredient total, so nothing invalid is
-    written.
+    written. Within _GRAMS_TOL counts as fitting: servings_per_batch=1 on a
+    523.3868 g batch rounds the serving up to 523.39 g.
     """
     if serving_grams > batch_grams and not math.isclose(serving_grams, batch_grams):
         raise ValueError(
