@@ -17,7 +17,6 @@ EXPECTED_TOOLS = {
     "add_recipe",
     "copy_day",
     "delete_custom_food",
-    "delete_recipe",
     "get_biometrics",
     "get_daily_nutrition",
     "get_fasting_history",

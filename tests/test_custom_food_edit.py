@@ -270,7 +270,6 @@ def test_update_custom_food_serving_size_in_diary(
         ("1.5 cups", {}, "cups", 1.5),
         ("2 cookies", {"serving_quantity": 3}, "cookies", 3),
         ("1/2 cup", {"serving_grams": 120}, "1/2 cup", 1.0),
-        ("0 calorie syrup", {"serving_grams": 15}, "0 calorie syrup", 1.0),
     ],
 )
 def test_update_custom_food_quantity_led_serving_name(
@@ -310,6 +309,17 @@ def test_update_custom_food_rejects_bad_serving_numbers(tmp_path, field, bad):
 
     with pytest.raises(ValueError, match=field):
         client.update_custom_food(FOOD_ID, **{field: bad})
+    assert state["payloads"] == []
+
+
+@pytest.mark.parametrize("serving_name", ["0 calorie syrup", "0.0 cups", "   "])
+def test_update_custom_food_rejects_zero_or_empty_serving_name(tmp_path, serving_name):
+    """Shared with update_recipe: a zero leading number can't be a quantity,
+    so it is an error rather than silently kept as part of the name."""
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match="serving_name"):
+        client.update_custom_food(FOOD_ID, serving_name=serving_name)
     assert state["payloads"] == []
 
 
@@ -365,7 +375,7 @@ def test_update_custom_food_refuses_database_foods(tmp_path):
         tmp_path, [custom_food(source="CRDB", owner=None), OK]
     )
 
-    with pytest.raises(CronometerError, match="not a custom food"):
+    with pytest.raises(CronometerError, match="not a user-created food"):
         client.update_custom_food(FOOD_ID, name="Renamed")
 
     assert len(state["payloads"]) == 1  # only the get_food
@@ -415,19 +425,22 @@ def test_retire_custom_food_resends_food_with_retired_flag(tmp_path):
 def test_retire_custom_food_refuses_database_foods(tmp_path):
     client, state = make_cold_client(tmp_path, [custom_food(source="USDA"), OK])
 
-    with pytest.raises(CronometerError, match="not a custom food"):
+    with pytest.raises(CronometerError, match="not a user-created food"):
         client.retire_custom_food(FOOD_ID)
 
     assert len(state["payloads"]) == 1
 
 
-def test_retire_custom_food_refuses_recipes(tmp_path):
+def test_retire_custom_food_also_retires_recipes(tmp_path):
+    """Retiring is the same flag for both, so recipes are accepted."""
     client, state = make_cold_client(tmp_path, [recipe(), OK])
 
-    with pytest.raises(CronometerError, match="recipe"):
-        client.retire_custom_food(FOOD_ID)
+    result = client.retire_custom_food(FOOD_ID)
 
-    assert len(state["payloads"]) == 1
+    data = state["payloads"][1]["data"]
+    assert data["retired"] is True
+    assert data["ingredients"] == recipe()["ingredients"]
+    assert result == {"food_id": FOOD_ID, "name": "Test Recipe", "retired": True}
 
 
 # ---------------------------------------------------------------------------

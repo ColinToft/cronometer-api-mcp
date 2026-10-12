@@ -368,9 +368,8 @@ def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):
 # create_recipe
 #
 # Recipes post to the same /api/v2/add_food endpoint as custom foods; the
-# `ingredients` array is what makes a food a recipe. Nutrients are aggregated
-# from the ingredients' per-100g profiles and re-normalized to per-100g of the
-# finished batch. Verified against the live API (food 79474948).
+# `ingredients` array is what makes a food a recipe. The server derives the
+# per-100g nutrients from the ingredients, so the client sends none.
 # ---------------------------------------------------------------------------
 
 RECIPE_INGREDIENT_FOODS = [
@@ -406,7 +405,7 @@ def _recipe_client(tmp_path: Path, responses=None):
 
 
 def test_create_recipe_payload_shape(tmp_path):
-    """Ingredients, weight-based measures, and per-100g aggregate nutrients."""
+    """Ingredients and weight-based measures; nutrients are left to the server."""
     client, state = _recipe_client(tmp_path)
 
     result = client.create_recipe(
@@ -452,11 +451,9 @@ def test_create_recipe_payload_shape(tmp_path):
     # The serving measure leads, since the server makes the first one default.
     assert data["measures"][0]["name"] == "Serving"
 
-    # Batch: 200*1.0 + 300*0.5 = 350 kcal over 150g -> 233.333333 per 100g.
-    amounts = {n["id"]: n["amount"] for n in data["nutrients"]}
-    assert amounts[208] == 233.333333
-    assert amounts[203] == round(25.0 * 100 / 150, 6)  # only in the sardines
-    assert amounts[205] == round(60.0 * 50 / 150, 6)  # only in the creme
+    # The server derives nutrients from the ingredients (verified live with an
+    # empty list), so none are sent.
+    assert data["nutrients"] == []
 
 
 def test_create_recipe_explicit_serving_and_comments(tmp_path):

@@ -138,11 +138,10 @@ cached session, so it also overrides a stale cached timezone.
 | `remove_food_entry` | Remove one or more diary entries |
 | `add_custom_food` | Create a custom food with specified nutrition |
 | `update_custom_food` | Edit a custom food in place: name, nutrition, or serving size |
-| `delete_custom_food` | Retire a custom food so it leaves search and the Custom Foods list (existing diary entries are kept) |
+| `delete_custom_food` | Retire a custom food or recipe so it leaves search (existing diary entries are kept) |
 | `add_recipe` | Create a recipe from existing foods referenced by ID and gram weight |
 | `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
 | `update_recipe` | Edit a recipe in place, keeping its food ID: replace its ingredient list, rename it, change its default serving's name/weight, or its notes. Cronometer re-derives the nutrients from the new ingredients |
-| `delete_recipe` | Retire a recipe so it leaves search, the same way `delete_custom_food` retires a custom food (existing diary entries are kept) |
 | `copy_day` | Copy all entries from the previous day |
 | `mark_day_complete` | Mark a diary day as complete or incomplete |
 
@@ -219,10 +218,11 @@ The API uses two protocols:
 - **v3 (`DELETE /api/v3/user/{id}/*`)** -- Header-based auth (`x-crono-session`), used for diary entry deletion
 
 Custom foods and recipes are both saved through `POST /api/v2/add_food`, which upserts: a food
-sent with its existing id is edited in place. For a recipe, the server re-derives the nutrients and
-the "full recipe" weight from the `ingredients` list on every save. No hard-delete endpoint for
-foods is known, so the delete tools set `retired` instead (the food leaves search after a few
-seconds but stays readable by id, and diary entries that use it are kept).
+sent with its existing id is edited in place, and diary entries that use it reflect the edit. For a
+recipe, the server derives the nutrients and the "full recipe" weight from the `ingredients` list on
+every save, so the client sends none. No hard-delete endpoint for foods is known, so
+`delete_custom_food` sets `retired` instead (the food leaves search after a few seconds but stays
+readable by id, and diary entries that use it are kept).
 
 Recipe import is the one asynchronous operation: `import_recipe` returns a job id, and `poll_async_result` is polled until the server reports 100% progress and attaches the parsed ingredients.
 

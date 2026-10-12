@@ -885,9 +885,9 @@ def update_custom_food(
 
     Only the arguments you pass change; everything else keeps its current
     value. Find the food_id with search_foods (source "Custom") or
-    get_food_details. Diary entries that already use the food pick up the
-    new values. Recipes cannot be edited with this tool, even though they
-    also show as source "Custom".
+    get_food_details. Diary entries that already use the food, including on
+    past days, are recalculated with the new values. Recipes cannot be edited
+    with this tool, even though they also show as source "Custom".
 
     Nutrient amounts are per serving: the food's default serving, or
     serving_grams when you pass it. To change the serving weight without
@@ -946,26 +946,18 @@ def update_custom_food(
 
 @mcp.tool(annotations=_DESTRUCTIVE)
 def delete_custom_food(food_id: int) -> str:
-    """Delete a custom food (one you created) by retiring it.
+    """Delete a custom food or recipe (one you created) by retiring it.
 
-    The food disappears from search and from the Custom Foods list. Diary
-    entries that already use it are kept, and get_food_details can still read
-    it by ID. Database foods (USDA, NCCDB, CRDB, ...) and recipes cannot be
-    deleted with this tool.
+    The API has no hard delete. The food drops out of search after a few
+    seconds; diary entries that already use it are kept, and
+    get_food_details can still read it by ID (flagged "retired"). Database
+    foods (USDA, NCCDB, CRDB, ...) cannot be deleted.
 
     Args:
-        food_id: ID of the custom food to delete.
+        food_id: ID of the custom food or recipe to delete.
     """
     try:
-        client = _get_client()
-        result = client.retire_custom_food(food_id)
-        return _ok(
-            {
-                "food_id": result["food_id"],
-                "name": result["name"],
-                "retired": True,
-            }
-        )
+        return _ok(_get_client().retire_custom_food(food_id))
     except Exception as e:
         return _err(e)
 
@@ -1063,11 +1055,11 @@ def update_recipe(
 ) -> str:
     """Edit an existing recipe (one you created) in place.
 
-    The recipe keeps its food_id, so diary entries that already use it pick
-    up the changes. Only the arguments you pass change. Cronometer re-derives
-    the nutrients and the "full recipe" weight from the ingredients. Check
-    the result with get_food_details. Plain custom foods go through
-    update_custom_food instead.
+    The recipe keeps its food_id, and diary entries that already use it,
+    including on past days, are recalculated with the new nutrients. Only the
+    arguments you pass change. Cronometer derives the nutrients and the "full
+    recipe" weight from the ingredients. Check the result with
+    get_food_details. Plain custom foods go through update_custom_food.
 
     Args:
         food_id: ID of the recipe to edit.
@@ -1079,10 +1071,10 @@ def update_recipe(
             serving_grams, so a bigger batch means more servings, not bigger
             ones.
         name: New recipe name.
-        serving_name: New name for the default serving, e.g.
+        serving_name: New name for the recipe's serving, e.g.
             "serving (1/6 batch)". A leading number ("2 bowls") becomes the
-            serving's quantity.
-        serving_grams: New weight of the default serving in grams.
+            serving's quantity. "g", "oz" and "full recipe" are reserved.
+        serving_grams: New weight of the serving in grams.
         comments: New recipe notes ("" clears them).
     """
     try:
@@ -1097,32 +1089,6 @@ def update_recipe(
             comments=comments,
         )
         return _ok(result)
-    except Exception as e:
-        return _err(e)
-
-
-@mcp.tool(annotations=_DESTRUCTIVE)
-def delete_recipe(food_id: int) -> str:
-    """Delete a recipe (one you created) by retiring it.
-
-    Sets the same `retired` flag delete_custom_food uses (the API has no hard
-    delete): the recipe drops out of search after a few seconds, diary entries
-    that already use it are kept, and get_food_details can still read it by
-    ID. Plain custom foods go through delete_custom_food instead.
-
-    Args:
-        food_id: ID of the recipe to delete.
-    """
-    try:
-        client = _get_client()
-        result = client.retire_recipe(food_id)
-        return _ok(
-            {
-                "food_id": result["food_id"],
-                "name": result["name"],
-                "retired": True,
-            }
-        )
     except Exception as e:
         return _err(e)
 
