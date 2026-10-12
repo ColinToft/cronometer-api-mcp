@@ -230,9 +230,13 @@ def get_food_log(
         return _err(e)
 
 
+def _enriched_diary(client: CronometerClient, day: date) -> dict:
+    """Fetch a day's diary with each Serving enriched (name, nutrients, ...)."""
+    return client.enrich_diary_servings(client.get_diary(day))
+
+
 def _food_log_for_day(client: CronometerClient, day: date) -> dict:
-    data = client.get_diary(day)
-    data = client.enrich_diary_servings(data)
+    data = _enriched_diary(client, day)
 
     summary = (data or {}).get("summary") or {}
     target = (summary.get("macros") or {}).get("energy")
@@ -251,6 +255,207 @@ def _food_log_for_day(client: CronometerClient, day: date) -> dict:
         "nutrition_summary": client.get_consumed_nutrients(day),
         "diary": data,
     }
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def get_nutrient_sources(
+    nutrients: list[str] | str,
+    date: str | None = None,
+    days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
+    top_n: Annotated[int, Field(ge=1, le=50, strict=True)] = 10,
+) -> str:
+    """Rank the foods that supplied the most of one or more nutrients.
+
+    Use this for "where did my sodium come from?" or "top protein sources this
+    week". It returns only the ranking, so it stays small; prefer it over
+    get_food_log, whose per-entry nutrient profiles are very large.
+
+    For each requested nutrient over the date range, returns the total, unit,
+    the split by diary group (breakfast, lunch, dinner, snacks), and the top_n
+    foods by amount. The same food is combined across entries and days. Each
+    source has the food name, food_id, grams eaten in total, amount supplied,
+    percent of the total, and the number of diary entries. Foods past top_n
+    are summed under "other". The total is the sum over logged foods, so it
+    matches get_daily_nutrition. Exercise and biometric entries are ignored,
+    and a food with no data for a nutrient adds nothing to it.
+
+    grams is null for a food logged in a serving-based recipe's reference
+    servings, which have no gram weight. Diary groups 1-4 use Cronometer's
+    default names even if they were renamed in the app; any further group
+    shows as "group N".
+
+    Args:
+        nutrients: One nutrient name or a list, matched case-insensitively
+            against Cronometer's names, e.g. "sodium", "Saturated", "Omega-3",
+            "fat". A part of a name works when it fits only one nutrient
+            ("B12" for "B12 (Cobalamin)"). Unknown or ambiguous names return
+            an error that lists the candidates.
+        date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
+              Defaults to today in the account timezone, resolved at call time.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date;
+              days=3 includes today, date='yesterday', days=3 excludes today.
+        top_n: Number of foods to list per nutrient, 1–50 (default 10).
+
+    One day returns date; multiple days return start_date and end_date.
+    """
+    try:
+        if type(top_n) is not int or not 1 <= top_n <= 50:
+            raise ValueError("top_n must be an integer between 1 and 50.")
+        if isinstance(nutrients, str):
+            nutrients = [nutrients]
+        if not nutrients:
+            raise ValueError("nutrients must name at least one nutrient.")
+        for query in nutrients:
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError(
+                    f"Nutrient names must be non-empty strings; got {query!r}."
+                )
+        resolved_days = _resolve_read_days(date, days)
+        client = _get_client()
+        defs = client.get_nutrient_definitions()
+        nutrient_ids = _match_nutrients(nutrients, defs)
+        diaries = [_enriched_diary(client, day) for day in resolved_days]
+        dates = (
+            {"date": resolved_days[0].isoformat()}
+            if len(resolved_days) == 1
+            else {
+                "start_date": resolved_days[0].isoformat(),
+                "end_date": resolved_days[-1].isoformat(),
+            }
+        )
+        ranking = _rank_sources(diaries, defs, nutrient_ids, top_n)
+        return _ok({**dates, "nutrients": ranking})
+    except Exception as e:
+        return _err(e)
+
+
+_DIARY_GROUP_NAMES = {1: "breakfast", 2: "lunch", 3: "dinner", 4: "snacks"}
+
+
+def _match_nutrients(queries: list[str], defs: dict[int, dict]) -> list[int]:
+    """Resolve nutrient names to catalog IDs, in request order, without repeats.
+
+    An exact (case-insensitive) name wins; otherwise the query must be part of
+    exactly one name. Anything else raises, naming the candidates.
+    """
+    names = {nid: meta["name"] for nid, meta in defs.items() if meta["name"]}
+    resolved: list[int] = []
+    for query in queries:
+        q = query.strip().lower()
+        matches = [nid for nid, name in names.items() if name.lower() == q] or [
+            nid for nid, name in names.items() if q in name.lower()
+        ]
+        if not matches:
+            raise ValueError(
+                f"Unknown nutrient {query!r}. Valid names: "
+                + ", ".join(sorted(names.values(), key=str.lower))
+                + "."
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"Nutrient {query!r} is ambiguous; it matches "
+                + ", ".join(sorted(names[nid] for nid in matches))
+                + ". Use the full name."
+            )
+        if matches[0] not in resolved:
+            resolved.append(matches[0])
+    return resolved
+
+
+def _rank_sources(
+    diaries: list[dict], defs: dict[int, dict], nutrient_ids: list[int], top_n: int
+) -> list[dict]:
+    """Aggregate enriched diaries into a per-nutrient ranking of foods.
+
+    Raises if any Serving entry lacks nutrient data (enrichment is best-effort
+    and leaves an entry bare when its food can't be fetched), since the totals
+    would silently undercount.
+    """
+    servings = [
+        e for diary in diaries for e in diary["diary"] if e["type"] == "Serving"
+    ]
+    unresolved = sorted({e["foodId"] for e in servings if "nutrients" not in e})
+    if unresolved:
+        raise RuntimeError(
+            "Could not load nutrient data for food_ids "
+            + ", ".join(map(str, unresolved))
+            + "; totals would be incomplete. Try again."
+        )
+
+    results = []
+    for nid in nutrient_ids:
+        foods: dict[int, dict] = {}
+        groups: dict[int, float] = {}
+        for entry in servings:
+            amount = next(
+                (n["amount"] for n in entry["nutrients"] if n["id"] == nid), 0.0
+            )
+            food = foods.setdefault(
+                entry["foodId"],
+                {
+                    "food": entry["name"],
+                    "food_id": entry["foodId"],
+                    "grams": 0.0,
+                    "amount": 0.0,
+                    "entries": 0,
+                },
+            )
+            food["amount"] += amount
+            food["entries"] += 1
+            # Serving-based recipe entries count reference servings, not grams.
+            serving_size = entry.get("serving_size")
+            if food["grams"] is not None and (
+                serving_size is None or serving_size["grams"] is not None
+            ):
+                food["grams"] += entry["grams"]
+            else:
+                food["grams"] = None
+            group = entry["order"] >> 16
+            groups[group] = groups.get(group, 0.0) + amount
+
+        ranked = sorted(
+            (f for f in foods.values() if f["amount"] > 0),
+            key=lambda f: (-f["amount"], f["food"]),
+        )
+        total = sum(f["amount"] for f in ranked)
+
+        def pct(amount: float, total: float = total) -> float:
+            return round(100 * amount / total, 1)
+
+        sources = [
+            {
+                **f,
+                "grams": None if f["grams"] is None else round(f["grams"], 1),
+                "amount": round(f["amount"], 2),
+                "percent": pct(f["amount"]),
+            }
+            for f in ranked[:top_n]
+        ]
+        result = {
+            "nutrient_id": nid,
+            "name": defs[nid]["name"],
+            "unit": defs[nid]["unit"],
+            "total": round(total, 2),
+            "by_diary_group": {
+                _DIARY_GROUP_NAMES.get(g, f"group {g}"): {
+                    "amount": round(a, 2),
+                    "percent": pct(a),
+                }
+                for g, a in sorted(groups.items())
+                if a > 0
+            },
+            "sources": sources,
+        }
+        rest = ranked[top_n:]
+        if rest:
+            other = sum(f["amount"] for f in rest)
+            result["other"] = {
+                "foods": len(rest),
+                "amount": round(other, 2),
+                "percent": pct(other),
+            }
+        results.append(result)
+    return results
 
 
 # ------------------------------------------------------------------
