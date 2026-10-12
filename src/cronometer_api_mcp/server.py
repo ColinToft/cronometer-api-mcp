@@ -739,7 +739,9 @@ def get_food_details(food_id: int) -> str:
     """Get detailed food information including nutrition and serving sizes.
 
     Use this after search_foods to get the full nutrient profile and
-    available measure_ids needed for add_food_entry.
+    available measure_ids needed for add_food_entry. For a recipe it also
+    returns its ingredients (in update_recipe's input shape) and comments; a
+    deleted (retired) food is flagged with "retired": true.
 
     Args:
         food_id: Food ID from search_foods results.
@@ -761,15 +763,27 @@ def get_food_details(food_id: int) -> str:
                 }
             )
 
-        return _ok(
-            {
-                "food_id": data.get("id"),
-                "name": data.get("name"),
-                "default_measure_id": data.get("defaultMeasureId"),
-                "measures": measures,
-                "nutrients": data.get("nutrients", []),
-            }
-        )
+        details = {
+            "food_id": data.get("id"),
+            "name": data.get("name"),
+            "default_measure_id": data.get("defaultMeasureId"),
+            "measures": measures,
+            "nutrients": data.get("nutrients", []),
+        }
+        if data.get("ingredients"):
+            details["ingredients"] = [
+                {
+                    "food_id": i["foodId"],
+                    "grams": i["grams"],
+                    "measure_id": i["measureId"],
+                }
+                for i in data["ingredients"]
+            ]
+            # A recipe saved without comments has no "comments" key (seen live).
+            details["comments"] = data.get("comments")
+        if data.get("retired"):
+            details["retired"] = True
+        return _ok(details)
     except Exception as e:
         return _err(e)
 
@@ -872,9 +886,9 @@ def update_custom_food(
 
     Only the arguments you pass change; everything else keeps its current
     value. Find the food_id with search_foods (source "Custom") or
-    get_food_details. Diary entries that already use the food pick up the
-    new values. Recipes cannot be edited with this tool, even though they
-    also show as source "Custom".
+    get_food_details. Diary entries that already use the food, including on
+    past days, are recalculated with the new values. Recipes cannot be edited
+    with this tool, even though they also show as source "Custom".
 
     Nutrient amounts are per serving: the food's default serving, or
     serving_grams when you pass it. To change the serving weight without
@@ -933,26 +947,20 @@ def update_custom_food(
 
 @mcp.tool(annotations=_DESTRUCTIVE)
 def delete_custom_food(food_id: int) -> str:
-    """Delete a custom food (one you created) by retiring it.
+    """Delete a custom food or recipe (one you created) by retiring it.
 
-    The food disappears from search and from the Custom Foods list. Diary
-    entries that already use it are kept, and get_food_details can still read
-    it by ID. Database foods (USDA, NCCDB, CRDB, ...) and recipes cannot be
-    deleted with this tool.
+    The API has no hard delete. The food drops out of search after a few
+    seconds; diary entries that already use it are kept, and
+    get_food_details can still read it by ID (flagged "retired"). Database
+    foods (USDA, NCCDB, CRDB, ...) cannot be deleted, and neither can
+    serving-based recipes (made in the app with "Recipe"-type measures):
+    re-sending one through the API is untested, so delete those in the app.
 
     Args:
-        food_id: ID of the custom food to delete.
+        food_id: ID of the custom food or recipe to delete.
     """
     try:
-        client = _get_client()
-        result = client.retire_custom_food(food_id)
-        return _ok(
-            {
-                "food_id": result["food_id"],
-                "name": result["name"],
-                "retired": True,
-            }
-        )
+        return _ok(_get_client().retire_custom_food(food_id))
     except Exception as e:
         return _err(e)
 
@@ -961,6 +969,29 @@ def delete_custom_food(food_id: int) -> str:
 # Recipe creation
 # ------------------------------------------------------------------
 
+_INGREDIENT_KEYS = frozenset({"food_id", "grams", "measure_id"})
+
+
+def _parse_ingredient_dicts(ingredients: list[dict]) -> list[tuple]:
+    """Ingredient dicts to client tuples; unknown keys are rejected."""
+    parsed = []
+    for item in ingredients:
+        if "food_id" not in item or "grams" not in item:
+            raise ValueError(
+                f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
+            )
+        unknown = set(item) - _INGREDIENT_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown ingredient keys {sorted(unknown)} in {item!r}; "
+                f"expected food_id, grams, and optionally measure_id"
+            )
+        if item.get("measure_id") is not None:
+            parsed.append((item["food_id"], item["grams"], item["measure_id"]))
+        else:
+            parsed.append((item["food_id"], item["grams"]))
+    return parsed
+
 
 @mcp.tool(annotations=_WRITE)
 def add_recipe(
@@ -968,6 +999,8 @@ def add_recipe(
     ingredients: list[dict],
     serving_name: str = "Serving",
     serving_grams: float | None = None,
+    servings_per_batch: float | None = None,
+    serving_quantity: float = 1.0,
     comments: str | None = None,
 ) -> str:
     """Create a recipe in Cronometer from other foods in the database.
@@ -984,46 +1017,108 @@ def add_recipe(
         ingredients: List of {"food_id": int, "grams": float} objects, one per
             ingredient. An optional "measure_id" overrides the unit shown in
             Cronometer's UI; "grams" always drives the nutrition math.
-        serving_name: Name of the default serving measure (default "Serving").
-        serving_grams: Grams in one serving. Defaults to the full batch weight
-            (one serving = the whole recipe).
+        serving_name: Name of the default serving measure (default "Serving"),
+            stored exactly as given, e.g. "serving (1/6 batch)". "g", "oz" and
+            "full recipe" are reserved, and a name starting with a quantity
+            ("2 bowls") is refused: pass serving_quantity=2, serving_name="bowls".
+        serving_grams: Grams in one serving, at most the batch weight. Defaults
+            to the full batch weight (one serving = the whole recipe).
+        servings_per_batch: Instead of serving_grams, make the serving this
+            fraction of the batch, e.g. 6 for "serving (1/6 batch)".
+        serving_quantity: How many units the serving is (default 1); the app
+            shows "<quantity> <serving_name>", e.g. 1.5 with "cups".
         comments: Free-text recipe notes.
     """
     try:
-        parsed = []
-        for item in ingredients:
-            if "food_id" not in item or "grams" not in item:
-                return _err(
-                    ValueError(
-                        f"Each ingredient needs 'food_id' and 'grams'; got {item!r}"
-                    )
-                )
-            if item.get("measure_id") is not None:
-                parsed.append((item["food_id"], item["grams"], item["measure_id"]))
-            else:
-                parsed.append((item["food_id"], item["grams"]))
-
+        parsed = _parse_ingredient_dicts(ingredients)
         client = _get_client()
         result = client.create_recipe(
             name,
             ingredients=parsed,
             serving_name=serving_name,
             serving_grams=serving_grams,
+            servings_per_batch=servings_per_batch,
+            serving_quantity=serving_quantity,
             comments=comments,
         )
 
-        # Fetch back to get the server-assigned measure_id
-        food_data = client.get_food(result["food_id"])
         return _ok(
             {
                 "food_id": result["food_id"],
-                "measure_id": food_data.get("defaultMeasureId"),
+                "measure_id": result["measure_id"],
+                "serving_grams": result["serving_grams"],
                 "name": name,
                 "total_grams": result["total_grams"],
                 "ingredient_count": result["ingredient_count"],
                 "note": "Use food_id and measure_id with add_food_entry to log this recipe.",
             }
         )
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def update_recipe(
+    food_id: int,
+    ingredients: list[dict] | None = None,
+    name: str | None = None,
+    serving_name: str | None = None,
+    serving_grams: float | None = None,
+    servings_per_batch: float | None = None,
+    serving_quantity: float | None = None,
+    comments: str | None = None,
+) -> str:
+    """Edit an existing recipe (one you created) in place.
+
+    The recipe keeps its food_id. In diary entries that already use it,
+    including on past days, the nutrients per gram update. After a serving
+    resize, entries logged by the serving follow it ("1 serving" stays 1
+    serving), while entries logged by "g" keep their grams (both verified
+    live). The result has a `note` when the serving's grams change. Only the
+    arguments you pass change. Cronometer derives the nutrients and the "full
+    recipe" weight from the ingredients. Check the result with
+    get_food_details. Plain custom foods go through update_custom_food. On a
+    recipe with several named servings, any ingredient edit that changes the
+    batch weight is refused, even with servings_per_batch or serving_grams;
+    do it in the Cronometer app.
+
+    Args:
+        food_id: ID of the recipe to edit.
+        ingredients: The complete new ingredient list, in add_recipe's
+            [{"food_id": int, "grams": float, "measure_id"?: int}] form. It
+            replaces the old list entirely: to change one ingredient, read the
+            current list with get_food_details and send it all back with that
+            change. If the new list changes the batch weight, also pass
+            servings_per_batch=N to keep a "serving (1/N batch)" at 1/N, or
+            serving_grams to keep its weight; without either it's refused.
+        name: New recipe name.
+        serving_name: New name for the recipe's serving, stored exactly as
+            given, e.g. "serving (1/6 batch)". Its quantity and weight are
+            unchanged unless passed. "g", "oz" and "full recipe" are reserved,
+            and a name starting with a quantity ("2 bowls") is refused.
+        serving_grams: New weight of the serving in grams, at most the batch
+            weight. Unlike update_custom_food, this keeps the quantity.
+        servings_per_batch: Instead of serving_grams, make the serving this
+            fraction of the (new) batch: batch grams / servings_per_batch,
+            rounded to 0.01 g.
+        serving_quantity: How many units the serving is; the app shows
+            "<quantity> <serving_name>", e.g. 1.5 with "cups".
+        comments: New recipe notes ("" clears them).
+    """
+    try:
+        parsed = None if ingredients is None else _parse_ingredient_dicts(ingredients)
+        client = _get_client()
+        result = client.update_recipe(
+            food_id,
+            ingredients=parsed,
+            name=name,
+            serving_name=serving_name,
+            serving_grams=serving_grams,
+            servings_per_batch=servings_per_batch,
+            serving_quantity=serving_quantity,
+            comments=comments,
+        )
+        return _ok(result)
     except Exception as e:
         return _err(e)
 
@@ -1054,12 +1149,10 @@ def import_recipe(ingredients: str, name: str | None = None) -> str:
         client = _get_client()
         result = client.import_recipe(ingredients, name=name)
 
-        # Fetch back to get the server-assigned measure_id
-        food_data = client.get_food(result["food_id"])
         return _ok(
             {
                 "food_id": result["food_id"],
-                "measure_id": food_data.get("defaultMeasureId"),
+                "measure_id": result["measure_id"],
                 "name": result["recipe_name"],
                 "total_grams": result["total_grams"],
                 "ingredient_count": result["ingredient_count"],

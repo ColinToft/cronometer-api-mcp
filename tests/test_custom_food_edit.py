@@ -421,13 +421,42 @@ def test_retire_custom_food_refuses_database_foods(tmp_path):
     assert len(state["payloads"]) == 1
 
 
-def test_retire_custom_food_refuses_recipes(tmp_path):
+def test_retire_custom_food_also_retires_recipes(tmp_path):
+    """Retiring is the same flag for both, so recipes are accepted."""
     client, state = make_cold_client(tmp_path, [recipe(), OK])
 
-    with pytest.raises(CronometerError, match="recipe"):
-        client.retire_custom_food(FOOD_ID)
+    result = client.retire_custom_food(FOOD_ID)
+
+    data = state["payloads"][1]["data"]
+    assert data["retired"] is True
+    assert data["ingredients"] == recipe()["ingredients"]
+    assert result == {"food_id": FOOD_ID, "name": "Test Recipe", "retired": True}
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_update_custom_food_rejects_blank_name(tmp_path, name):
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match="name must not be empty"):
+        client.update_custom_food(FOOD_ID, name=name)
+
+    assert state["payloads"] == []
+
+
+def test_update_custom_food_refuses_retired_foods(tmp_path):
+    client, state = make_cold_client(tmp_path, [custom_food(retired=True), OK])
+
+    with pytest.raises(CronometerError, match="deleted"):
+        client.update_custom_food(FOOD_ID, name="X")
 
     assert len(state["payloads"]) == 1
+
+
+def test_retire_custom_food_accepts_already_retired_foods(tmp_path):
+    client, state = make_cold_client(tmp_path, [custom_food(retired=True), OK])
+
+    assert client.retire_custom_food(FOOD_ID)["retired"] is True
+    assert state["payloads"][1]["data"]["retired"] is True
 
 
 # ---------------------------------------------------------------------------
