@@ -17,7 +17,6 @@ import json
 import logging
 import math
 import os
-import re
 import struct
 import threading
 import time
@@ -90,9 +89,6 @@ _RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
 # otherwise send an unbounded float.
 _GRAMS_DECIMALS = 2
 _GRAMS_TOL = 0.01
-
-# A serving name that leads with a plain number, e.g. "2 cookies".
-_QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
 
 # Nutrient IDs create_custom_food() already writes via its named macro args
 # (including the derived/negative-ID duplicates it sends alongside them).
@@ -667,14 +663,18 @@ class CronometerClient:
         sodium_mg: float = 0,
         saturated_fat_g: float = 0,
         extra_nutrients: dict[int, float] | None = None,
-        serving_name: str = "1 serving",
+        serving_name: str = "serving",
         serving_grams: float = 100.0,
+        serving_quantity: float = 1,
     ) -> dict:
         """Create a custom food in Cronometer.
 
-        Nutrient amounts are per the full serving (serving_grams).
-        They are normalized to per-100g internally, since Cronometer stores
-        all nutrient data on a per-100g basis.
+        Nutrient amounts are per the full serving: serving_quantity units of
+        serving_name, with serving_grams the total weight of all of them. They
+        are normalized to per-100g, since Cronometer stores all nutrient data
+        that way. A serving_name that leads with a quantity ("2 cookies") is
+        refused. The saved serving is read back and re-sent once if the server
+        re-parsed its name (see _settle_serving).
 
         Args:
             extra_nutrients: Additional nutrients beyond the core macros above
@@ -687,10 +687,13 @@ class CronometerClient:
                 above; doing so raises ValueError rather than silently
                 duplicating or shadowing an entry.
 
-        Returns {"food_id": int, "measure_id": int | None}.
+        Returns {"food_id": int, "measure_id": int}.
         """
+        serving_name = _serving_name(serving_name)
+        _check_positive("serving_grams", serving_grams)
+        _check_positive("serving_quantity", serving_quantity)
         # Cronometer stores nutrients per 100g -- normalize from per-serving.
-        scale = 100.0 / serving_grams if serving_grams > 0 else 1.0
+        scale = 100.0 / serving_grams
 
         net_carbs = max(0, carbs_g - fiber_g)
 
@@ -743,7 +746,7 @@ class CronometerClient:
                         "id": 0,
                         "name": serving_name,
                         "value": serving_grams,
-                        "amount": 1.0,
+                        "amount": serving_quantity,
                         "type": "Atomic",
                     }
                 ],
@@ -760,8 +763,25 @@ class CronometerClient:
         if not food_id:
             raise CronometerError(f"Failed to create custom food: {data}")
 
+        try:
+            with self._food_lock(food_id):
+                food = self.get_food(food_id)
+                _, serving = self._settle_serving(
+                    food,
+                    food["defaultMeasureId"],
+                    serving_name,
+                    serving_quantity,
+                    serving_grams,
+                    recipe=False,
+                )
+        except Exception as e:
+            # As in create_recipe: the food exists, so the id must reach the
+            # caller to prevent a duplicate.
+            raise CronometerError(
+                f"The custom food exists (id {food_id}); don't re-create it. {e}"
+            ) from e
         logger.info("Created custom food %r (id=%d)", name, food_id)
-        return {"food_id": food_id, "measure_id": None}
+        return {"food_id": food_id, "measure_id": serving["id"]}
 
     # ------------------------------------------------------------------
     # Custom food edit / retire
@@ -838,11 +858,17 @@ class CronometerClient:
 
     @staticmethod
     def _default_measure(food: dict) -> dict | None:
+        """The food's default measure, or None if it has no measures."""
         measures = food.get("measures") or []
+        if not measures:
+            return None
         for m in measures:
-            if m.get("id") == food.get("defaultMeasureId"):
+            if m["id"] == food["defaultMeasureId"]:
                 return m
-        return measures[0] if measures else None
+        raise CronometerError(
+            f"Food {food['id']}'s default measure {food['defaultMeasureId']} "
+            f"isn't one of its measures; fix it in the Cronometer app"
+        )
 
     def update_custom_food(
         self,
@@ -876,9 +902,9 @@ class CronometerClient:
         weight therefore also resets the quantity (to serving_quantity, or 1)
         and makes the measure a named ("Atomic") serving. Otherwise a food
         first saved as "400 g" keeps amount=400 and type "Weight" and shows up
-        as "400 <serving_name>" with no weight of its own. A quantity leading
-        serving_name ("2 cookies") is moved into the quantity for the same
-        reason. A quantity set without serving_grams keeps the total weight,
+        as "400 <serving_name>" with no weight of its own. serving_name must
+        not lead with a quantity ("2 cookies"); pass it as serving_quantity.
+        A quantity set without serving_grams keeps the total weight,
         so the per-unit weight changes. (update_recipe keeps the quantity on a
         resize instead: its servings never have this "400 g" shape.)
 
@@ -893,22 +919,11 @@ class CronometerClient:
                     f"those instead."
                 )
 
-        # The server splits a leading quantity off a new measure's name
-        # ("10 pieces" is stored as amount=10, name="pieces") but not when
-        # an existing measure is re-sent, so do the same here. Done before
-        # validation so an inferred quantity is checked too.
-        quantity_label = "serving_quantity"
         if serving_name is not None:
-            led = _QUANTITY_LED_NAME.match(serving_name)
-            if led and float(led.group(1)) > 0:
-                serving_name = led.group(2)
-                if serving_quantity is None:
-                    serving_quantity = float(led.group(1))
-                    quantity_label = "serving_name quantity"
-
+            serving_name = _serving_name(serving_name)
         for label, v in (
             ("serving_grams", serving_grams),
-            (quantity_label, serving_quantity),
+            ("serving_quantity", serving_quantity),
         ):
             if v is not None:
                 _check_positive(label, v)
@@ -918,20 +933,6 @@ class CronometerClient:
             food = self._get_user_food(food_id, recipe=False)
 
             self._rename(food, name)
-
-            measure = self._default_measure(food)
-            if measure is not None:
-                if serving_name is not None:
-                    measure["name"] = serving_name
-                if serving_grams is not None:
-                    measure["value"] = serving_grams
-                if serving_grams is not None or serving_quantity is not None:
-                    measure["amount"] = (
-                        serving_quantity if serving_quantity is not None else 1.0
-                    )
-                    measure["type"] = "Atomic"
-            grams = (measure or {}).get("value") or 100.0
-            scale = 100.0 / grams if grams > 0 else 1.0
 
             per_serving = {
                 NUTRIENT_IDS["energy"]: calories,
@@ -943,13 +944,40 @@ class CronometerClient:
                 NUTRIENT_IDS["sodium"]: sodium_mg,
                 NUTRIENT_IDS["saturated_fat"]: saturated_fat_g,
             }
-            updates = {
-                nid: round(v * scale, 2)
-                for nid, v in per_serving.items()
-                if v is not None
-            }
-            for nid, v in (extra_nutrients or {}).items():
-                updates[nid] = round(v * scale, 2)
+            per_serving = {nid: v for nid, v in per_serving.items() if v is not None}
+            per_serving.update(extra_nutrients or {})
+
+            serving_args = (serving_name, serving_grams, serving_quantity)
+            measure = self._default_measure(food)
+            if measure is None and (
+                per_serving or any(v is not None for v in serving_args)
+            ):
+                raise CronometerError(
+                    f"Custom food {food_id} has no serving measure, so its "
+                    f"serving and per-serving nutrients can't be set; fix it in "
+                    f"the Cronometer app"
+                )
+            if serving_name is not None:
+                measure["name"] = serving_name
+            if serving_grams is not None:
+                measure["value"] = serving_grams
+            if serving_grams is not None or serving_quantity is not None:
+                measure["amount"] = (
+                    serving_quantity if serving_quantity is not None else 1.0
+                )
+                measure["type"] = "Atomic"
+            updates = {}
+            if per_serving:
+                grams = measure["value"]
+                if not _is_positive_number(grams):
+                    raise CronometerError(
+                        f"Custom food {food_id}'s serving weighs {grams!r} g, so "
+                        f"per-serving nutrients can't be converted; pass "
+                        f"serving_grams too"
+                    )
+                updates = {
+                    nid: round(v * 100.0 / grams, 2) for nid, v in per_serving.items()
+                }
 
             nutrients = food.setdefault("nutrients", [])
             by_id = {n["id"]: n for n in nutrients}
@@ -1038,7 +1066,7 @@ class CronometerClient:
                 `grams` is always what the nutrient math uses. When omitted,
                 the ingredient's own gram measure is resolved automatically.
             serving_name: Name of the default serving measure, stored exactly
-                as given (see _settle_recipe_serving).
+                as given (see _settle_serving).
             serving_grams: Grams in one serving. Defaults to the full batch
                 weight (i.e. one serving = the whole recipe).
             servings_per_batch: Instead of serving_grams, size the serving as
@@ -1121,7 +1149,7 @@ class CronometerClient:
         try:
             with self._food_lock(food_id):
                 food = self.get_food(food_id)
-                measure_id = food.get("defaultMeasureId")
+                measure_id = food["defaultMeasureId"]
                 food, serving = self._settle_recipe_serving(
                     food, measure_id, serving_name, serving_quantity, serving_grams
                 )
@@ -1182,8 +1210,25 @@ class CronometerClient:
     def _settle_recipe_serving(
         self, food: dict, measure_id: int, name: str, quantity: float, grams: float
     ) -> tuple[dict, dict]:
-        """Make sure the saved serving reads back as (name, quantity, grams),
-        and that the server derived the recipe's nutrients.
+        """_settle_serving, then check that the server derived the recipe's
+        nutrients (a re-send goes out with them empty, so this proves it)."""
+        food, serving = self._settle_serving(
+            food, measure_id, name, quantity, grams, recipe=True
+        )
+        _check_derived_nutrients(food)
+        return food, serving
+
+    def _settle_serving(
+        self,
+        food: dict,
+        measure_id: int,
+        name: str,
+        quantity: float,
+        grams: float,
+        *,
+        recipe: bool,
+    ) -> tuple[dict, dict]:
+        """Make sure the saved serving reads back as (name, quantity, grams).
 
         When the server creates a measure whose amount is 1 it may re-parse the
         name ("serving (1/2 batch)" was stored as amount 0.5, name "batch)").
@@ -1194,6 +1239,7 @@ class CronometerClient:
         Returns the read-back (food, serving).
         """
         food_id = food["id"]
+        kind = "Recipe" if recipe else "Custom food"
         for attempt in range(2):
             serving = next(
                 (m for m in food.get("measures") or [] if m.get("id") == measure_id),
@@ -1201,20 +1247,20 @@ class CronometerClient:
             )
             if serving is None:
                 raise CronometerError(
-                    f"Recipe {food_id} has no measure {measure_id} after saving"
+                    f"{kind} {food_id} has no measure {measure_id} after saving"
                 )
             if (
                 serving["name"] == name
                 and math.isclose(serving["amount"], quantity)
                 and math.isclose(serving["value"], grams, rel_tol=0, abs_tol=_GRAMS_TOL)
             ):
-                _check_derived_nutrients(food)
                 return food, serving
             if attempt:
                 break
             logger.info(
-                "Server stored recipe %d's serving as %r x%s (%s g); re-sending "
+                "Server stored %s %d's serving as %r x%s (%s g); re-sending "
                 "%r x%s (%s g)",
+                kind,
                 food_id,
                 serving["name"],
                 serving["amount"],
@@ -1224,12 +1270,12 @@ class CronometerClient:
                 grams,
             )
             serving.update(name=name, amount=quantity, value=grams)
-            # Empty again, so this read-back also proves the server derived them.
-            food["nutrients"] = []
+            if recipe:
+                food["nutrients"] = []
             self._save_food(food)
             food = self.get_food(food_id)
         raise CronometerError(
-            f"Recipe {food_id} was saved, but its serving reads back as "
+            f"{kind} {food_id} was saved, but its serving reads back as "
             f"{serving['name']!r} x{serving['amount']} ({serving['value']} g) "
             f"instead of {name!r} x{quantity} ({grams} g)"
         )
@@ -2036,11 +2082,7 @@ class CronometerClient:
             if measure:
                 portion_value = measure.get("value")
                 quantity = measure.get("amount", 1)
-                if not (
-                    isinstance(quantity, (int, float))
-                    and math.isfinite(quantity)
-                    and quantity > 0
-                ):
+                if not _is_positive_number(quantity):
                     quantity = None
                 entry["serving_size"] = {
                     "measure_id": measure.get("id"),
@@ -2253,9 +2295,9 @@ def _is_fixed_recipe_measure(name: str) -> bool:
     return _measure_key(name) in _RECIPE_FIXED_MEASURES
 
 
-def _recipe_serving_name(name: str) -> str:
-    """Strip a recipe serving name; refuse blanks, built-in measure names, and
-    names that start with a quantity (the app would show "1 2 bowls")."""
+def _serving_name(name: str) -> str:
+    """Strip a serving name; refuse blanks and names that start with a
+    quantity (the app would show "1 2 bowls")."""
     name = name.strip()
     if not name:
         raise ValueError("serving_name must not be empty")
@@ -2266,6 +2308,12 @@ def _recipe_serving_name(name: str) -> str:
             f"serving_quantity and only the unit as serving_name (e.g. "
             f"serving_quantity=2, serving_name='bowls')"
         )
+    return name
+
+
+def _recipe_serving_name(name: str) -> str:
+    """_serving_name, also refusing the recipe's built-in measure names."""
+    name = _serving_name(name)
     if _is_fixed_recipe_measure(name):
         raise ValueError(
             f"serving_name {name!r} is reserved for one of the recipe's "
@@ -2274,8 +2322,12 @@ def _recipe_serving_name(name: str) -> str:
     return name
 
 
+def _is_positive_number(v: object) -> bool:
+    return isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+
+
 def _check_positive(label: str, v: float) -> None:
-    if not (math.isfinite(v) and v > 0):
+    if not _is_positive_number(v):
         raise ValueError(f"{label} must be a positive number, got {v!r}")
 
 

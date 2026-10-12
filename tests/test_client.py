@@ -9,6 +9,7 @@ the failure was surfaced to callers as a success.
 from __future__ import annotations
 
 import copy
+import json
 import re
 import threading
 import time
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from cronometer_api_mcp import server as mcp_server
 from cronometer_api_mcp.client import CronometerClient, CronometerError
 
 # Real response body observed from an expired session.
@@ -1005,7 +1007,7 @@ def test_import_recipe_rejects_blank_input(tmp_path, monkeypatch):
 
 def test_create_custom_food_extra_nutrients_payload(tmp_path):
     """extra_nutrients are appended, normalized to per-100g like the macros."""
-    client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 555}])
+    client, state = make_server_client(tmp_path, FakeFoodServer())
 
     client.create_custom_food(
         "Test Food",
@@ -1181,3 +1183,192 @@ def test_reauthenticate_logs_in_when_token_is_still_stale(tmp_path):
 
     assert state["login"] == 1
     assert client._token == "FRESH_TOKEN"
+
+
+LEADING_QUANTITY_NAMES = [
+    "2 bowls",
+    "1.5 cups",
+    "1/2 cup",
+    "1 1/2 cups",
+    "  3 plates",
+    "½ cup",
+    "1½ cups",
+    ".5 cup",
+    "2x bowls",
+    "2-3 bowls",
+    "1,5 cups",
+    "2",
+    "⅓ batch",
+    "⅞ cup",
+    "¼",
+    "⅟2 cup",
+    "↉",
+]
+
+
+def _create(client, **kwargs):
+    return client.create_custom_food(
+        "Test Food", calories=200, protein_g=10, fat_g=5, carbs_g=20, **kwargs
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "name", "amount"),
+    [
+        ({}, "serving", 1),
+        ({"serving_name": " cookies ", "serving_quantity": 2}, "cookies", 2),
+    ],
+)
+def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
+    client, state = make_server_client(tmp_path, FakeFoodServer())
+
+    result = _create(client, serving_grams=30, **kwargs)
+
+    assert state["endpoints"] == ["add_food", "get_food"]
+    (measure,) = state["payloads"][0]["data"]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"]) == (name, amount, 30)
+    assert result == {"food_id": 4242, "measure_id": 9000}
+
+
+@pytest.mark.parametrize(
+    "serving_name", ["serving (1/2 batch)", "cup 1/3 full", "slice (1/4 pie)"]
+)
+def test_create_custom_food_resends_reparsed_serving(tmp_path, serving_name):
+    """A new measure's name can be re-parsed by the server (server_reparse);
+    the serving is re-sent once, verbatim, and the nutrients are kept."""
+    server = FakeFoodServer()
+    client, state = make_server_client(tmp_path, server)
+
+    result = _create(client, serving_name=serving_name, serving_grams=250)
+
+    assert state["endpoints"] == ["add_food", "get_food", "add_food", "get_food"]
+    sent = state["payloads"][2]["data"]
+    assert sent["nutrients"] == state["payloads"][0]["data"]["nutrients"]
+    (measure,) = server.foods[result["food_id"]]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"]) == (
+        serving_name,
+        1,
+        250,
+    )
+
+
+def test_create_custom_food_raises_with_id_when_serving_wont_settle(tmp_path):
+    """A serving still rewritten after the re-send is an error naming the
+    food id, since the food already exists."""
+    server = FakeFoodServer()
+    client, state = make_server_client(tmp_path, server)
+    save = server._save
+
+    def reparse_every_save(food):
+        food["measures"][0].update(name="batch)", amount=0.5)
+        return save(food)
+
+    server._save = reparse_every_save
+
+    with pytest.raises(CronometerError, match=r"exists \(id 4242\).*reads back as"):
+        _create(client, serving_name="serving (1/2 batch)")
+    assert state["endpoints"] == ["add_food", "get_food", "add_food", "get_food"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"serving_name": n}, "pass the number as serving_quantity")
+        for n in LEADING_QUANTITY_NAMES
+    ]
+    + [({"serving_name": n}, "serving_name must not be empty") for n in ("", "  ")]
+    + [
+        ({field: v}, field)
+        for field in ("serving_grams", "serving_quantity")
+        for v in (0, -1, float("nan"), float("inf"))
+    ],
+)
+def test_create_custom_food_rejects_bad_serving(tmp_path, kwargs, match):
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match=match):
+        _create(client, **kwargs)
+    assert state["payloads"] == []
+
+
+def _failing_server(fail_on: str, call: int) -> FakeFoodServer:
+    """A FakeFoodServer whose `call`-th request to `fail_on` raises."""
+    fake = FakeFoodServer()
+    handle, seen = fake.handle, {"n": 0}
+
+    def flaky(endpoint, body):
+        if endpoint == f"/api/v2/{fail_on}":
+            seen["n"] += 1
+            if seen["n"] == call:
+                raise CronometerError(f"{fail_on} timed out")
+        return handle(endpoint, body)
+
+    fake.handle = flaky
+    return fake
+
+
+@pytest.mark.parametrize(
+    ("fail_on", "call", "serving_name", "add_foods"),
+    [
+        ("get_food", 1, "serving", 1),
+        ("add_food", 2, "serving (1/2 batch)", 2),
+    ],
+)
+def test_create_custom_food_failure_after_save_names_the_id(
+    tmp_path, fail_on, call, serving_name, add_foods
+):
+    client, state = make_server_client(tmp_path, _failing_server(fail_on, call))
+
+    with pytest.raises(CronometerError, match=r"exists \(id 4242\)"):
+        _create(client, serving_name=serving_name)
+    assert state["endpoints"].count("add_food") == add_foods
+
+
+@pytest.mark.parametrize(
+    ("break_read_back", "match"),
+    [
+        (lambda food: food.update(measures=[]), "has no measure 9000"),
+        (lambda food: food.pop("defaultMeasureId"), "'defaultMeasureId'"),
+    ],
+)
+def test_create_custom_food_read_back_without_default_measure(
+    tmp_path, break_read_back, match
+):
+    fake = FakeFoodServer()
+    client, state = make_server_client(tmp_path, fake)
+    handle = fake.handle
+
+    def broken(endpoint, body):
+        out = handle(endpoint, body)
+        if endpoint == "/api/v2/get_food":
+            break_read_back(out)
+        return out
+
+    fake.handle = broken
+
+    with pytest.raises(CronometerError, match=rf"exists \(id 4242\).*{match}"):
+        _create(client)
+    assert state["endpoints"] == ["add_food", "get_food"]
+
+
+def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
+    client, state = make_server_client(tmp_path, FakeFoodServer())
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
+
+    out = json.loads(
+        mcp_server.add_custom_food(
+            "Cookies",
+            calories=100,
+            protein_g=2,
+            fat_g=5,
+            carbs_g=12,
+            serving_name="cookies",
+            serving_grams=30,
+            serving_quantity=2,
+        )
+    )
+
+    assert out["status"] == "success"
+    assert (out["food_id"], out["measure_id"]) == (4242, 9000)
+    (measure,) = state["payloads"][0]["data"]["measures"]
+    assert (measure["name"], measure["amount"], measure["value"]) == ("cookies", 2, 30)

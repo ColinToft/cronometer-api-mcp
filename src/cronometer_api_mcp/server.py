@@ -805,8 +805,9 @@ def add_custom_food(
     sodium_mg: float = 0,
     saturated_fat_g: float = 0,
     extra_nutrients: dict[int, float] | None = None,
-    serving_name: str = "1 serving",
+    serving_name: str = "serving",
     serving_grams: float = 100.0,
+    serving_quantity: float = 1,
 ) -> str:
     """Create a custom food in Cronometer with specified nutrition.
 
@@ -829,8 +830,11 @@ def add_custom_food(
             its name) and valued per the full serving. IDs aren't validated,
             so a wrong one writes the wrong nutrient; must not reuse an ID the
             named macro args already cover.
-        serving_name: Name for the serving size (default "1 serving").
-        serving_grams: Weight of one serving in grams (default 100).
+        serving_name: Unit name for the serving (default "serving"). A name
+            that starts with a number ("2 cookies") is refused.
+        serving_grams: Total weight of the serving (all serving_quantity
+            units) in grams (default 100).
+        serving_quantity: Units per serving (default 1), e.g. 2 "cookies".
     """
     try:
         client = _get_client()
@@ -847,12 +851,8 @@ def add_custom_food(
             extra_nutrients=extra_nutrients,
             serving_name=serving_name,
             serving_grams=serving_grams,
+            serving_quantity=serving_quantity,
         )
-
-        # Fetch back to get the server-assigned measure_id
-        food_data = client.get_food(result["food_id"])
-        result["measure_id"] = food_data.get("defaultMeasureId")
-
         return _ok(
             {
                 "food_id": result["food_id"],
@@ -911,7 +911,7 @@ def update_custom_food(
             an ID the named args already cover.
         serving_name: New name for the default serving. The app shows the
             serving as "<quantity> <name>"; a leading number ("2 cookies")
-            is taken as the quantity (see serving_quantity).
+            is refused: pass it as serving_quantity.
         serving_grams: New total weight of the default serving in grams.
             Also resets the quantity to serving_quantity (or 1).
         serving_quantity: How many units make up the default serving
