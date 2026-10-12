@@ -11,7 +11,12 @@ import math
 
 import httpx
 import pytest
-from test_client import FakeFoodServer, make_server_client, server_reparse
+from test_client import (
+    LEADING_QUANTITY_NAMES,
+    FakeFoodServer,
+    make_server_client,
+    server_reparse,
+)
 
 from cronometer_api_mcp import server
 from cronometer_api_mcp.client import CronometerError
@@ -1258,26 +1263,6 @@ def test_get_food_details_plain_food_has_no_recipe_fields(monkeypatch):
 # ---------------------------------------------------------------------------
 # Leading quantities, derived nutrients, serving weight
 # ---------------------------------------------------------------------------
-
-LEADING_QUANTITY_NAMES = [
-    "2 bowls",
-    "1.5 cups",
-    "1/2 cup",
-    "1 1/2 cups",
-    "  3 plates",
-    "½ cup",
-    "1½ cups",
-    ".5 cup",
-    "2x bowls",
-    "2-3 bowls",
-    "1,5 cups",
-    "2",
-    "⅓ batch",
-    "⅞ cup",
-    "¼",
-    "⅟2 cup",
-    "↉",
-]
 
 
 @pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 
 import pytest
-from test_client import make_cold_client
+from test_client import LEADING_QUANTITY_NAMES, make_cold_client
 
 from cronometer_api_mcp.client import CronometerError
 
@@ -156,13 +156,13 @@ def test_update_custom_food_serving_overrides_measure_and_scale(tmp_path):
     client, state = make_cold_client(tmp_path, [custom_food(), OK])
 
     client.update_custom_food(
-        FOOD_ID, serving_name="1 cup", serving_grams=200, calories=400
+        FOOD_ID, serving_name="cup", serving_grams=200, calories=400
     )
 
     data = state["payloads"][1]["data"]
     (measure,) = data["measures"]
     assert measure["id"] == 900
-    assert measure["name"] == "cup"  # the leading 1 is the quantity
+    assert measure["name"] == "cup"
     assert measure["amount"] == 1.0
     assert measure["value"] == 200
     assert nutrients_by_id(state["payloads"][1])[208] == 200.0  # 400 per 200 g
@@ -208,13 +208,6 @@ def test_update_custom_food_serving_quantity(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"serving_name": "2 cookies"},
-        {"serving_name": "cookies", "serving_quantity": 2},
-    ],
-)
-@pytest.mark.parametrize(
     ("measure_id", "quantity", "unit", "grams", "counts"),
     [
         (900, 2, "cookies", 30, (0.5, 1, 1.5)),
@@ -222,14 +215,16 @@ def test_update_custom_food_serving_quantity(tmp_path):
     ],
 )
 def test_update_custom_food_serving_size_in_diary(
-    tmp_path, monkeypatch, kwargs, measure_id, quantity, unit, grams, counts
+    tmp_path, monkeypatch, measure_id, quantity, unit, grams, counts
 ):
     food = custom_food()
     food["measures"].append(
         {"id": 901, "name": "cookie", "amount": 1, "value": 15, "type": "Atomic"}
     )
     client, state = make_cold_client(tmp_path, [food, OK])
-    client.update_custom_food(FOOD_ID, serving_grams=30, **kwargs)
+    client.update_custom_food(
+        FOOD_ID, serving_grams=30, serving_name="cookies", serving_quantity=2
+    )
 
     saved = state["payloads"][1]["data"]
     monkeypatch.setattr(client, "get_foods", lambda ids: [saved])
@@ -262,32 +257,35 @@ def test_update_custom_food_serving_size_in_diary(
         assert energy["amount"] == calories
 
 
-@pytest.mark.parametrize(
-    ("given", "kwargs", "name", "amount"),
-    [
-        ("1 serving", {}, "serving", 1.0),
-        ("10 pieces", {}, "pieces", 10.0),
-        ("1.5 cups", {}, "cups", 1.5),
-        ("2 cookies", {"serving_quantity": 3}, "cookies", 3),
-        ("1/2 cup", {"serving_grams": 120}, "1/2 cup", 1.0),
-        ("0 calorie syrup", {"serving_grams": 15}, "0 calorie syrup", 1.0),
-    ],
-)
-def test_update_custom_food_quantity_led_serving_name(
-    tmp_path, given, kwargs, name, amount
-):
-    """A plain number leading serving_name becomes the quantity, as the server
-    does for a new measure; an explicit serving_quantity wins."""
-    client, state = make_cold_client(tmp_path, [weight_default_food(), OK])
+@pytest.mark.parametrize("kwargs", [{}, {"serving_quantity": 2}])
+@pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)
+def test_update_custom_food_rejects_leading_quantity(tmp_path, serving_name, kwargs):
+    client, state = make_cold_client(tmp_path, [])
 
-    client.update_custom_food(FOOD_ID, serving_name=given, **kwargs)
+    with pytest.raises(ValueError, match="pass the number as serving_quantity"):
+        client.update_custom_food(FOOD_ID, serving_name=serving_name, **kwargs)
+    assert state["payloads"] == []
+
+
+@pytest.mark.parametrize("serving_name", ["", "   "])
+def test_update_custom_food_rejects_blank_serving_name(tmp_path, serving_name):
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match="serving_name must not be empty"):
+        client.update_custom_food(FOOD_ID, serving_name=serving_name)
+    assert state["payloads"] == []
+
+
+@pytest.mark.parametrize(
+    "serving_name", ["cookie (2 per pack)", "serving #2", "half (½) cup"]
+)
+def test_update_custom_food_keeps_inner_numbers(tmp_path, serving_name):
+    client, state = make_cold_client(tmp_path, [custom_food(), OK])
+
+    client.update_custom_food(FOOD_ID, serving_name=f"  {serving_name} ")
 
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["name"], measure["amount"], measure["type"]) == (
-        name,
-        amount,
-        "Atomic",
-    )
+    assert (measure["name"], measure["amount"]) == (serving_name, 1)
 
 
 def test_update_custom_food_serving_name_alone_keeps_quantity(tmp_path):
@@ -310,16 +308,6 @@ def test_update_custom_food_rejects_bad_serving_numbers(tmp_path, field, bad):
 
     with pytest.raises(ValueError, match=field):
         client.update_custom_food(FOOD_ID, **{field: bad})
-    assert state["payloads"] == []
-
-
-def test_update_custom_food_rejects_overflowing_name_quantity(tmp_path):
-    """A leading number too large for a float would become inf; it is
-    rejected before anything is fetched or saved."""
-    client, state = make_cold_client(tmp_path, [])
-
-    with pytest.raises(ValueError, match="serving_name quantity"):
-        client.update_custom_food(FOOD_ID, serving_name="9" * 400 + " cookies")
     assert state["payloads"] == []
 
 

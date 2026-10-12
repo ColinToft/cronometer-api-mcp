@@ -17,7 +17,6 @@ import json
 import logging
 import math
 import os
-import re
 import struct
 import threading
 import time
@@ -90,9 +89,6 @@ _RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
 # otherwise send an unbounded float.
 _GRAMS_DECIMALS = 2
 _GRAMS_TOL = 0.01
-
-# A serving name that leads with a plain number, e.g. "2 cookies".
-_QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
 
 # Nutrient IDs create_custom_food() already writes via its named macro args
 # (including the derived/negative-ID duplicates it sends alongside them).
@@ -876,9 +872,9 @@ class CronometerClient:
         weight therefore also resets the quantity (to serving_quantity, or 1)
         and makes the measure a named ("Atomic") serving. Otherwise a food
         first saved as "400 g" keeps amount=400 and type "Weight" and shows up
-        as "400 <serving_name>" with no weight of its own. A quantity leading
-        serving_name ("2 cookies") is moved into the quantity for the same
-        reason. A quantity set without serving_grams keeps the total weight,
+        as "400 <serving_name>" with no weight of its own. serving_name must
+        not lead with a quantity ("2 cookies"); pass it as serving_quantity.
+        A quantity set without serving_grams keeps the total weight,
         so the per-unit weight changes. (update_recipe keeps the quantity on a
         resize instead: its servings never have this "400 g" shape.)
 
@@ -893,22 +889,11 @@ class CronometerClient:
                     f"those instead."
                 )
 
-        # The server splits a leading quantity off a new measure's name
-        # ("10 pieces" is stored as amount=10, name="pieces") but not when
-        # an existing measure is re-sent, so do the same here. Done before
-        # validation so an inferred quantity is checked too.
-        quantity_label = "serving_quantity"
         if serving_name is not None:
-            led = _QUANTITY_LED_NAME.match(serving_name)
-            if led and float(led.group(1)) > 0:
-                serving_name = led.group(2)
-                if serving_quantity is None:
-                    serving_quantity = float(led.group(1))
-                    quantity_label = "serving_name quantity"
-
+            serving_name = _serving_name(serving_name)
         for label, v in (
             ("serving_grams", serving_grams),
-            (quantity_label, serving_quantity),
+            ("serving_quantity", serving_quantity),
         ):
             if v is not None:
                 _check_positive(label, v)
@@ -2253,9 +2238,9 @@ def _is_fixed_recipe_measure(name: str) -> bool:
     return _measure_key(name) in _RECIPE_FIXED_MEASURES
 
 
-def _recipe_serving_name(name: str) -> str:
-    """Strip a recipe serving name; refuse blanks, built-in measure names, and
-    names that start with a quantity (the app would show "1 2 bowls")."""
+def _serving_name(name: str) -> str:
+    """Strip a serving name; refuse blanks and names that start with a
+    quantity (the app would show "1 2 bowls")."""
     name = name.strip()
     if not name:
         raise ValueError("serving_name must not be empty")
@@ -2266,6 +2251,12 @@ def _recipe_serving_name(name: str) -> str:
             f"serving_quantity and only the unit as serving_name (e.g. "
             f"serving_quantity=2, serving_name='bowls')"
         )
+    return name
+
+
+def _recipe_serving_name(name: str) -> str:
+    """_serving_name, also refusing the recipe's built-in measure names."""
+    name = _serving_name(name)
     if _is_fixed_recipe_measure(name):
         raise ValueError(
             f"serving_name {name!r} is reserved for one of the recipe's "

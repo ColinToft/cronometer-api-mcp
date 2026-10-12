@@ -1181,3 +1181,24 @@ def test_reauthenticate_logs_in_when_token_is_still_stale(tmp_path):
 
     assert state["login"] == 1
     assert client._token == "FRESH_TOKEN"
+
+
+LEADING_QUANTITY_NAMES = [
+    "2 bowls",
+    "1.5 cups",
+    "1/2 cup",
+    "1 1/2 cups",
+    "  3 plates",
+    "½ cup",
+    "1½ cups",
+    ".5 cup",
+    "2x bowls",
+    "2-3 bowls",
+    "1,5 cups",
+    "2",
+    "⅓ batch",
+    "⅞ cup",
+    "¼",
+    "⅟2 cup",
+    "↉",
+]

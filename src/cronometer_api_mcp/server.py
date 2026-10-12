@@ -911,7 +911,7 @@ def update_custom_food(
             an ID the named args already cover.
         serving_name: New name for the default serving. The app shows the
             serving as "<quantity> <name>"; a leading number ("2 cookies")
-            is taken as the quantity (see serving_quantity).
+            is refused: pass it as serving_quantity.
         serving_grams: New total weight of the default serving in grams.
             Also resets the quantity to serving_quantity (or 1).
         serving_quantity: How many units make up the default serving

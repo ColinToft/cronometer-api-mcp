@@ -223,9 +223,11 @@ recipe, the server derives the nutrients and the "full recipe" weight from the `
 every save, so the client sends none. No hard-delete endpoint for foods is known, so
 `delete_custom_food` sets `retired` instead (the food leaves search after a few seconds but stays
 readable by id, and diary entries that use it are kept).
-Retired foods can't be edited. Recipe serving names are sent exactly as given with an explicit
-quantity; when the server re-parses a new measure's name (it does for some names when the quantity
-is 1, e.g. "serving (1/2 batch)"), the client re-sends the measure verbatim, which sticks.
+Retired foods can't be edited. Serving names are sent exactly as given with an explicit quantity,
+so `update_custom_food`, `add_recipe` and `update_recipe` refuse a name that starts with a number
+("2 cookies"): pass `serving_quantity=2, serving_name="cookies"`. When the server re-parses a new
+recipe measure's name (it does for some names when the quantity is 1, e.g. "serving (1/2 batch)"),
+the client re-sends the measure verbatim, which sticks.
 
 Recipe import is the one asynchronous operation: `import_recipe` returns a job id, and `poll_async_result` is polled until the server reports 100% progress and attaches the parsed ingredients.
 
