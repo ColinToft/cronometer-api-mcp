@@ -1234,8 +1234,9 @@ def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
     ]
     + [({"serving_name": n}, "serving_name must not be empty") for n in ("", "  ")]
     + [
-        ({"serving_quantity": q}, "serving_quantity")
-        for q in (0, -1, float("nan"), float("inf"))
+        ({field: v}, field)
+        for field in ("serving_grams", "serving_quantity")
+        for v in (0, -1, float("nan"), float("inf"))
     ],
 )
 def test_create_custom_food_rejects_bad_serving(tmp_path, kwargs, match):

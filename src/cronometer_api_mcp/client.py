@@ -689,9 +689,10 @@ class CronometerClient:
         Returns {"food_id": int, "measure_id": int | None}.
         """
         serving_name = _serving_name(serving_name)
+        _check_positive("serving_grams", serving_grams)
         _check_positive("serving_quantity", serving_quantity)
         # Cronometer stores nutrients per 100g -- normalize from per-serving.
-        scale = 100.0 / serving_grams if serving_grams > 0 else 1.0
+        scale = 100.0 / serving_grams
 
         net_carbs = max(0, carbs_g - fiber_g)
 
