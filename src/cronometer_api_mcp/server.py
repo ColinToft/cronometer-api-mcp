@@ -910,7 +910,8 @@ def update_custom_food(
             an ID the named args already cover.
         serving_name: New name for the default serving. The app shows the
             serving as "<quantity> <name>"; a leading number ("2 cookies")
-            is taken as the quantity (see serving_quantity).
+            is taken as the quantity, and a bare name means quantity 1
+            unless serving_quantity is passed. The weight is unchanged.
         serving_grams: New total weight of the default serving in grams.
             Also resets the quantity to serving_quantity (or 1).
         serving_quantity: How many units make up the default serving
@@ -1012,7 +1013,10 @@ def add_recipe(
         ingredients: List of {"food_id": int, "grams": float} objects, one per
             ingredient. An optional "measure_id" overrides the unit shown in
             Cronometer's UI; "grams" always drives the nutrition math.
-        serving_name: Name of the default serving measure (default "Serving").
+        serving_name: Name of the default serving measure (default "Serving"),
+            stored as written, e.g. "serving (1/6 batch)". A leading number
+            ("2 bowls") becomes the serving's quantity. "g", "oz" and
+            "full recipe" are reserved.
         serving_grams: Grams in one serving. Defaults to the full batch weight
             (one serving = the whole recipe).
         comments: Free-text recipe notes.
@@ -1028,12 +1032,10 @@ def add_recipe(
             comments=comments,
         )
 
-        # Fetch back to get the server-assigned measure_id
-        food_data = client.get_food(result["food_id"])
         return _ok(
             {
                 "food_id": result["food_id"],
-                "measure_id": food_data.get("defaultMeasureId"),
+                "measure_id": result["measure_id"],
                 "name": name,
                 "total_grams": result["total_grams"],
                 "ingredient_count": result["ingredient_count"],
@@ -1071,9 +1073,10 @@ def update_recipe(
             serving_grams, so a bigger batch means more servings, not bigger
             ones.
         name: New recipe name.
-        serving_name: New name for the recipe's serving, e.g.
-            "serving (1/6 batch)". A leading number ("2 bowls") becomes the
-            serving's quantity. "g", "oz" and "full recipe" are reserved.
+        serving_name: New name for the recipe's serving, stored as written,
+            e.g. "serving (1/6 batch)". A leading number ("2 bowls") becomes
+            the serving's quantity; a bare name means quantity 1. The weight
+            is unchanged. "g", "oz" and "full recipe" are reserved.
         serving_grams: New weight of the serving in grams.
         comments: New recipe notes ("" clears them).
     """
@@ -1119,12 +1122,10 @@ def import_recipe(ingredients: str, name: str | None = None) -> str:
         client = _get_client()
         result = client.import_recipe(ingredients, name=name)
 
-        # Fetch back to get the server-assigned measure_id
-        food_data = client.get_food(result["food_id"])
         return _ok(
             {
                 "food_id": result["food_id"],
-                "measure_id": food_data.get("defaultMeasureId"),
+                "measure_id": result["measure_id"],
                 "name": result["recipe_name"],
                 "total_grams": result["total_grams"],
                 "ingredient_count": result["ingredient_count"],

@@ -6,7 +6,3 @@ __pycache__/
 dist/
 build/
 .ruff_cache/
-
-# Local probe/scratch output from live API testing
-*_ids.json
-recipe_*_v*.json

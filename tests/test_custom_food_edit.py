@@ -269,7 +269,12 @@ def test_update_custom_food_serving_size_in_diary(
         ("10 pieces", {}, "pieces", 10.0),
         ("1.5 cups", {}, "cups", 1.5),
         ("2 cookies", {"serving_quantity": 3}, "cookies", 3),
+        # Fractions are not split client-side: a re-sent existing measure is
+        # stored verbatim (the server re-parses only measures it creates).
         ("1/2 cup", {"serving_grams": 120}, "1/2 cup", 1.0),
+        # A non-positive leading number is part of the name.
+        ("0 calorie syrup", {"serving_grams": 15}, "0 calorie syrup", 1.0),
+        ("0.0 cups", {}, "0.0 cups", 1.0),
     ],
 )
 def test_update_custom_food_quantity_led_serving_name(
@@ -289,16 +294,21 @@ def test_update_custom_food_quantity_led_serving_name(
     )
 
 
-def test_update_custom_food_serving_name_alone_keeps_quantity(tmp_path):
-    client, state = make_cold_client(tmp_path, [weight_default_food(), OK])
+def test_update_custom_food_bare_serving_name_means_quantity_one(tmp_path):
+    """Same rule as update_recipe: renaming "2 bowls" to "cups" gives
+    "1 cups" at the same weight."""
+    food = custom_food()
+    food["measures"][0].update(name="bowls", amount=2, value=300)
+    client, state = make_cold_client(tmp_path, [food, OK])
 
-    client.update_custom_food(FOOD_ID, serving_name="portion")
+    client.update_custom_food(FOOD_ID, serving_name="cups")
 
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["name"], measure["amount"], measure["type"]) == (
-        "portion",
-        400,
-        "Weight",
+    assert (measure["name"], measure["amount"], measure["value"], measure["type"]) == (
+        "cups",
+        1.0,
+        300,
+        "Atomic",
     )
 
 
@@ -312,10 +322,8 @@ def test_update_custom_food_rejects_bad_serving_numbers(tmp_path, field, bad):
     assert state["payloads"] == []
 
 
-@pytest.mark.parametrize("serving_name", ["0 calorie syrup", "0.0 cups", "   "])
-def test_update_custom_food_rejects_zero_or_empty_serving_name(tmp_path, serving_name):
-    """Shared with update_recipe: a zero leading number can't be a quantity,
-    so it is an error rather than silently kept as part of the name."""
+@pytest.mark.parametrize("serving_name", ["", "   "])
+def test_update_custom_food_rejects_blank_serving_name(tmp_path, serving_name):
     client, state = make_cold_client(tmp_path, [])
 
     with pytest.raises(ValueError, match="serving_name"):

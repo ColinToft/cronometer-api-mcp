@@ -8,6 +8,8 @@ the failure was surfaced to callers as a success.
 
 from __future__ import annotations
 
+import copy
+import re
 import threading
 import time
 from pathlib import Path
@@ -155,6 +157,110 @@ def make_cold_client(tmp_path: Path, responses: list[dict]):
         return FakeResp(body)
 
     client.login = fake_login  # type: ignore[method-assign]
+    client._http.post = fake_post  # type: ignore[method-assign]
+    return client, state
+
+
+_SERVER_FRACTION = re.compile(r"(?:^|.*?)\b([1-5])/([2-5])\s+(\S.*)$")
+_SERVER_LEADING_NUMBER = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
+
+
+def server_reparse(name: str, amount: float) -> tuple[str, float]:
+    """How add_food stores a NEW measure's name (observed live): only when
+    amount is 1, a leading number or an n/d fraction (d in 2-5) followed by a
+    space is split off into the amount. Existing measures are kept verbatim."""
+    if amount != 1:
+        return name, amount
+    led = _SERVER_LEADING_NUMBER.match(name)
+    if led:
+        return led.group(2), float(led.group(1))
+    frac = _SERVER_FRACTION.match(name)
+    if frac:
+        return frac.group(3), int(frac.group(1)) / int(frac.group(2))
+    return name, amount
+
+
+class FakeFoodServer:
+    """A stateful stand-in for add_food / get_food / get_foods.
+
+    add_food upserts like the real endpoint: new foods and measures get ids,
+    the first measure becomes the default, new measure names are re-parsed
+    (server_reparse), and a recipe's "full recipe" weight is derived from its
+    ingredients. `save_responses` replaces the next add_food answers.
+    """
+
+    def __init__(self, foods=(), ingredient_foods=(), save_responses=()):
+        self.foods = {f["id"]: copy.deepcopy(f) for f in foods}
+        self.ingredient_foods = {f["id"]: f for f in ingredient_foods}
+        self.save_responses = list(save_responses)
+        self.next_id = 4242
+        self.next_measure_id = 9000
+
+    def handle(self, endpoint: str, body: dict) -> dict:
+        if endpoint == "/api/v2/get_food":
+            food = copy.deepcopy(self.foods[body["id"]])
+            # A recipe without a stored "full recipe" reads back with a
+            # virtual id-0 one (seen live).
+            names = [m["name"] for m in food.get("measures", [])]
+            if food.get("ingredients") and "full recipe" not in names:
+                food["measures"].insert(
+                    0,
+                    {
+                        "id": 0,
+                        "name": "full recipe",
+                        "amount": 1,
+                        "value": sum(i["grams"] for i in food["ingredients"]),
+                        "type": "Weight",
+                    },
+                )
+            return {**food, "messages": []}
+        if endpoint == "/api/v2/get_foods":
+            return {
+                "foods": [
+                    self.ingredient_foods[i]
+                    for i in body["ids"]
+                    if i in self.ingredient_foods
+                ]
+            }
+        if endpoint == "/api/v2/add_food":
+            if self.save_responses:
+                return self.save_responses.pop(0)
+            return self._save(copy.deepcopy(body["data"]))
+        raise AssertionError(f"unexpected endpoint {endpoint}")
+
+    def _save(self, food: dict) -> dict:
+        if not food["id"]:
+            food["id"] = self.next_id
+            self.next_id += 1
+            food["source"] = "Custom"
+        for m in food["measures"]:
+            if not m["id"]:
+                m["id"] = self.next_measure_id
+                self.next_measure_id += 1
+                m["name"], m["amount"] = server_reparse(m["name"], m["amount"])
+        if not food.get("defaultMeasureId"):
+            food["defaultMeasureId"] = food["measures"][0]["id"]
+        if food.get("ingredients"):
+            for m in food["measures"]:
+                if m["name"] == "full recipe":
+                    m["value"] = sum(i["grams"] for i in food["ingredients"])
+        self.foods[food["id"]] = food
+        return {"result": "SUCCESS", "messages": [], "id": food["id"]}
+
+
+def make_server_client(tmp_path: Path, server: FakeFoodServer):
+    """A logged-in client backed by `server`; state records every request."""
+    client = CronometerClient(session_path=tmp_path / "session.json")
+    client._user_id = 42
+    client._token = "TOKEN"
+    state = {"endpoints": [], "payloads": []}
+
+    def fake_post(endpoint, json=None):
+        state["endpoints"].append(endpoint.removeprefix("/api/v2/"))
+        state["payloads"].append(copy.deepcopy(json))
+        return FakeResp(server.handle(endpoint, json))
+
+    client.login = lambda: None  # type: ignore[method-assign]
     client._http.post = fake_post  # type: ignore[method-assign]
     return client, state
 
@@ -396,12 +502,14 @@ RECIPE_INGREDIENT_FOODS = [
 ]
 
 
-def _recipe_client(tmp_path: Path, responses=None):
-    client, state = make_cold_client(
-        tmp_path, responses or [{"result": "SUCCESS", "id": 4242}]
+def first_save(state) -> dict:
+    return state["payloads"][state["endpoints"].index("add_food")]["data"]
+
+
+def _recipe_client(tmp_path: Path):
+    return make_server_client(
+        tmp_path, FakeFoodServer(ingredient_foods=RECIPE_INGREDIENT_FOODS)
     )
-    client.get_foods = lambda ids: RECIPE_INGREDIENT_FOODS  # type: ignore[method-assign]
-    return client, state
 
 
 def test_create_recipe_payload_shape(tmp_path):
@@ -412,8 +520,13 @@ def test_create_recipe_payload_shape(tmp_path):
         "Test Recipe", ingredients=[(1000, 100.0), (2000, 50.0)]
     )
 
-    assert result == {"food_id": 4242, "total_grams": 150.0, "ingredient_count": 2}
-    data = state["payloads"][0]["data"]
+    assert result == {
+        "food_id": 4242,
+        "measure_id": 9000,
+        "total_grams": 150.0,
+        "ingredient_count": 2,
+    }
+    data = first_save(state)
 
     # A new food, with ingredients -- the marker that makes it a recipe.
     assert data["id"] == 0
@@ -467,7 +580,7 @@ def test_create_recipe_explicit_serving_and_comments(tmp_path):
         comments="wildly inadvisable",
     )
 
-    data = state["payloads"][0]["data"]
+    data = first_save(state)
     assert data["measures"][0] == {
         "id": 0,
         "name": "bowl",
@@ -486,7 +599,7 @@ def test_create_recipe_measure_id_override(tmp_path):
 
     client.create_recipe("Test Recipe", ingredients=[(1000, 100.0, 10)])
 
-    assert state["payloads"][0]["data"]["ingredients"][0]["measureId"] == 10
+    assert first_save(state)["ingredients"][0]["measureId"] == 10
 
 
 def test_create_recipe_rejects_empty_and_malformed(tmp_path):
@@ -502,7 +615,7 @@ def test_create_recipe_rejects_empty_and_malformed(tmp_path):
         client.create_recipe("Test Recipe", ingredients=[(1000, 0)])
 
     # Validation happens before any network call.
-    assert state["post"] == 0
+    assert state["endpoints"] == []
 
 
 def test_create_recipe_missing_ingredient_food_raises(tmp_path):
@@ -512,7 +625,7 @@ def test_create_recipe_missing_ingredient_food_raises(tmp_path):
     with pytest.raises(CronometerError):
         client.create_recipe("Test Recipe", ingredients=[(1000, 100.0), (9999, 10.0)])
 
-    assert state["post"] == 0
+    assert state["endpoints"] == ["get_foods"]
 
 
 # ---------------------------------------------------------------------------
@@ -627,12 +740,15 @@ def _import_client(tmp_path: Path, monkeypatch, poll_bodies):
 
     state = {"calls": [], "polls": 0, "add_food": []}
     remaining = list(poll_bodies)
+    server = FakeFoodServer()
+    server.next_id = 76533895
 
     def fake_post(endpoint, json=None):
         state["calls"].append(endpoint)
         if endpoint == "/api/v2/add_food":
             state["add_food"].append(json)
-            return FakeResp({"result": "SUCCESS", "id": 76533895})
+        if endpoint in ("/api/v2/add_food", "/api/v2/get_food"):
+            return FakeResp(server.handle(endpoint, json))
         if endpoint in ("/api/v2/import_recipe", "/api/v2/poll_async_result"):
             if endpoint == "/api/v2/poll_async_result":
                 state["polls"] += 1
