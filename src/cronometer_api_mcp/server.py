@@ -1070,8 +1070,12 @@ def update_recipe(
 ) -> str:
     """Edit an existing recipe (one you created) in place.
 
-    The recipe keeps its food_id, and diary entries that already use it,
-    including on past days, are recalculated with the new nutrients. Only the
+    The recipe keeps its food_id. In diary entries that already use it,
+    including on past days, the nutrients per gram update. Entries logged by
+    the serving measure follow a resize, so their grams change too and
+    "1 serving" stays 1 serving (verified live); entries logged by g or oz
+    weren't tested. The result has a `note` when the serving's grams change.
+    Only the
     arguments you pass change. Cronometer derives the nutrients and the "full
     recipe" weight from the ingredients. Check the result with
     get_food_details. Plain custom foods go through update_custom_food.

@@ -93,9 +93,6 @@ _GRAMS_TOL = 0.01
 
 # A serving name that leads with a plain number, e.g. "2 cookies".
 _QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
-# Characters a recipe serving name may not start with: they would read as a
-# quantity ("2 bowls", ".5 cup", "½ cup"), which belongs in serving_quantity.
-_QUANTITY_START = frozenset(".¼½¾" + "".join(chr(c) for c in range(0x2150, 0x215F)))
 
 # Nutrient IDs create_custom_food() already writes via its named macro args
 # (including the derived/negative-ID duplicates it sends alongside them).
@@ -1270,8 +1267,14 @@ class CronometerClient:
         measure whose quantity is really a gram count (#66) to reset.
         Serving-based recipes ("Recipe"-type measures) are refused.
 
+        Existing diary entries: the nutrients per gram update. Entries logged
+        by the serving measure follow it, so after a resize their grams change
+        too and "1 serving" stays 1 serving (verified live: an entry's grams
+        went from 50 to 100 with the serving). Entries logged by g or oz
+        weren't tested.
+
         Returns the batch weight, plus the serving as read back when it was
-        resolved.
+        resolved, and a `note` when the serving's grams changed.
         """
         if all(
             v is None
@@ -1313,8 +1316,10 @@ class CronometerClient:
             # The serving is only looked at when it's edited, or when the batch
             # weight changes under it. Other edits work whatever its state.
             serving = None
+            grams_before = None
             if serving_edit or (batch_changed and self._recipe_servings(food)):
                 serving = self._recipe_serving(food)
+                grams_before = serving["value"]
                 servings_before = batch_before / serving["value"]
                 if batch_changed and not resizing:
                     raise ValueError(
@@ -1377,6 +1382,13 @@ class CronometerClient:
                 "quantity": serving["amount"],
                 "grams": serving["value"],
             }
+            if abs(serving["value"] - grams_before) > _GRAMS_TOL:
+                result["note"] = (
+                    f"The serving changed from {grams_before:g} g to "
+                    f"{serving['value']:g} g. Diary entries logged by this "
+                    f"serving follow it (their grams change too); entries logged "
+                    f"by g or oz may keep their grams, so check those days."
+                )
         return result
 
     def _ingredient_rows(
@@ -2239,7 +2251,8 @@ def _recipe_serving_name(name: str) -> str:
     name = name.strip()
     if not name:
         raise ValueError("serving_name must not be empty")
-    if name[0].isdigit() or name[0] in _QUANTITY_START:
+    # Anything numeric (digits, "½", "⅟", "↉") or "." reads as a quantity.
+    if name[0].isnumeric() or name[0] == ".":
         raise ValueError(
             f"serving_name {name!r} starts with a quantity; pass the number as "
             f"serving_quantity and only the unit as serving_name (e.g. "

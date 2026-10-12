@@ -1265,6 +1265,8 @@ LEADING_QUANTITY_NAMES = [
     "⅓ batch",
     "⅞ cup",
     "¼",
+    "⅟2 cup",
+    "↉",
 ]
 
 
@@ -1636,3 +1638,29 @@ def test_servings_per_batch_below_one_is_heavier_than_the_batch(tmp_path):
 def test_tools_pass_servings_per_batch_through(fake_client):
     server.update_recipe(7, servings_per_batch=6)
     assert fake_client.calls[0][2]["servings_per_batch"] == 6
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "note"),
+    [
+        ({"serving_grams": 50}, "from 76 g to 50 g"),
+        ({"ingredients": [(1234, 600)], "servings_per_batch": 2}, "from 76 g to 300 g"),
+        ({"servings_per_batch": 4}, "from 76 g to 38 g"),
+        ({"servings_per_batch": 2}, None),  # 152 / 2 is still 76 g
+        ({"serving_grams": 76.004}, None),  # within the 0.01 g tolerance
+        ({"ingredients": [(1234, 600)], "serving_grams": 76}, None),
+        ({"serving_name": "bowl"}, None),
+        ({"serving_quantity": 2}, None),
+        ({"name": "Renamed"}, None),
+    ],
+)
+def test_note_when_serving_grams_change(tmp_path, kwargs, note):
+    client, _ = recipe_client(tmp_path)
+
+    result = client.update_recipe(RECIPE_ID, **kwargs)
+
+    if note is None:
+        assert "note" not in result
+    else:
+        assert note in result["note"]
+        assert "Diary entries logged by this serving follow it" in result["note"]
