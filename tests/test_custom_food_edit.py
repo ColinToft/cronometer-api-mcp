@@ -433,6 +433,16 @@ def test_retire_custom_food_also_retires_recipes(tmp_path):
     assert result == {"food_id": FOOD_ID, "name": "Test Recipe", "retired": True}
 
 
+@pytest.mark.parametrize("name", ["", "   "])
+def test_update_custom_food_rejects_blank_name(tmp_path, name):
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match="name must not be empty"):
+        client.update_custom_food(FOOD_ID, name=name)
+
+    assert state["payloads"] == []
+
+
 def test_update_custom_food_refuses_retired_foods(tmp_path):
     client, state = make_cold_client(tmp_path, [custom_food(retired=True), OK])
 

@@ -313,8 +313,7 @@ def test_bare_rename_keeps_mangled_quantity_without_serving_quantity(tmp_path):
 @pytest.mark.parametrize(
     ("serving_name", "stored"),
     [
-        ("2 bowls", "2 bowls"),
-        ("1 1/2 cups", "1 1/2 cups"),
+        ("serving (1/6 batch)", "serving (1/6 batch)"),
         ("serving (1/2 batch)", "serving (1/2 batch)"),
         ("  bowl  ", "bowl"),
     ],
@@ -356,10 +355,10 @@ def test_bare_rename_keeps_quantity(tmp_path):
 def test_serving_name_and_grams_together(tmp_path):
     client, state = recipe_client(tmp_path)
 
-    client.update_recipe(RECIPE_ID, serving_name="bowl", serving_grams=300)
+    client.update_recipe(RECIPE_ID, serving_name="bowl", serving_grams=100)
 
     m = measures_by_id(saved(state))[313167825]
-    assert (m["name"], m["amount"], m["value"]) == ("bowl", 1.0, 300)
+    assert (m["name"], m["amount"], m["value"]) == ("bowl", 1, 100)
 
 
 @pytest.mark.parametrize("fixed", ["full recipe", "g", "oz"])
@@ -827,15 +826,13 @@ def test_create_reports_the_servers_batch_weight(tmp_path):
         # Kept by the server as sent (verified live).
         ("serving (1/6 batch)", 1.0, False),
         ("cups", 1.5, False),
-        # Re-parsed by the server when the quantity is 1 (live: "batch)" x 0.5,
-        # "cups" x 1.5 for "1 1/2 cups"), so the client re-sends the existing
-        # measure verbatim.
+        # Re-parsed by the server when the quantity is 1 (live: "batch)" x 0.5),
+        # so the client re-sends the existing measure verbatim.
         ("serving (1/2 batch)", 1.0, True),
         ("serving (1/3 batch)", 1.0, True),
-        ("1 1/2 cups", 1.0, True),
-        ("2 bowls", 1.0, True),
+        ("half (1/4 batch) portion", 1.0, True),
         # Not re-parsed: the quantity isn't 1.
-        ("2 bowls", 3.0, False),
+        ("bowls", 3.0, False),
     ],
 )
 def test_create_recipe_serving_reads_back_exactly(
@@ -1112,3 +1109,158 @@ def test_get_food_details_plain_food_has_no_recipe_fields(monkeypatch):
     assert "ingredients" not in out
     assert "comments" not in out
     assert "retired" not in out
+
+
+# ---------------------------------------------------------------------------
+# Leading quantities, derived nutrients, serving weight
+# ---------------------------------------------------------------------------
+
+LEADING_QUANTITY_NAMES = ["2 bowls", "1.5 cups", "1/2 cup", "1 1/2 cups", "  3 plates"]
+
+
+@pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)
+def test_create_recipe_rejects_leading_quantity(tmp_path, serving_name):
+    """The app would show "1 2 bowls"; the number belongs in serving_quantity."""
+    client, state = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[EGG]))
+
+    with pytest.raises(ValueError, match="pass the number as serving_quantity"):
+        client.create_recipe("R", ingredients=[(1234, 100)], serving_name=serving_name)
+
+    assert state["endpoints"] == []
+
+
+@pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)
+def test_update_recipe_rejects_leading_quantity(tmp_path, serving_name):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="pass the number as serving_quantity"):
+        client.update_recipe(RECIPE_ID, serving_name=serving_name)
+
+    assert state["endpoints"] == []
+
+
+@pytest.mark.parametrize(
+    "serving_name", ["serving (1/6 batch)", "1/2cup", "bowl of 2", "2x bowl", "½ cup"]
+)
+def test_names_without_a_leading_quantity_are_accepted(tmp_path, serving_name):
+    srv = FakeFoodServer(ingredient_foods=[EGG])
+    client, _ = make_server_client(tmp_path, srv)
+
+    result = client.create_recipe(
+        "R", ingredients=[(1234, 100)], serving_name=serving_name
+    )
+
+    m = measures_by_id(srv.foods[result["food_id"]])[result["measure_id"]]
+    assert (m["name"], m["amount"]) == (serving_name, 1.0)
+
+
+def test_create_recipe_raises_when_no_nutrients_were_derived(tmp_path):
+    srv = FakeFoodServer(ingredient_foods=[EGG], derive_nutrients=False)
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(
+        CronometerError, match=r"Recipe 4242 was saved, but has no derived nutrients"
+    ) as err:
+        client.create_recipe("R", ingredients=[(1234, 100)])
+
+    assert "update_recipe(4242" in str(err.value)
+    assert state["endpoints"].count("add_food") == 1
+
+
+def test_update_recipe_raises_when_no_nutrients_were_derived(tmp_path):
+    srv = FakeFoodServer(
+        foods=[recipe()], ingredient_foods=[BANANA, EGG, PB], derive_nutrients=False
+    )
+    client, _ = make_server_client(tmp_path, srv)
+
+    with pytest.raises(
+        CronometerError, match=rf"Recipe {RECIPE_ID} was saved, but has no derived"
+    ):
+        client.update_recipe(RECIPE_ID, name="X")
+
+
+def test_derived_energy_is_checked_on_every_save(tmp_path):
+    """The happy path: the fake server derives energy, and both calls pass."""
+    srv = FakeFoodServer(foods=[recipe()], ingredient_foods=[BANANA, EGG, PB])
+    client, _ = make_server_client(tmp_path, srv)
+
+    client.update_recipe(RECIPE_ID, ingredients=[(1234, 100)])
+    energy = {n["id"]: n["amount"] for n in srv.foods[RECIPE_ID]["nutrients"]}[208]
+    assert energy == pytest.approx(143.0)
+
+
+class GramsServer(FakeFoodServer):
+    """Stores a new serving with the wrong weight, as a mangled save might."""
+
+    def _save(self, food):
+        new = [m for m in food["measures"] if not m["id"]]
+        resp = super()._save(food)
+        for m in new[:1]:
+            stored = next(x for x in self.foods[food["id"]]["measures"] if x is m)
+            stored["value"] = 1
+        return resp
+
+
+def test_create_recipe_resends_serving_with_mangled_grams(tmp_path):
+    srv = GramsServer(ingredient_foods=[EGG])
+    client, state = make_server_client(tmp_path, srv)
+
+    result = client.create_recipe(
+        "R", ingredients=[(1234, 100)], serving_name="bowl", serving_grams=40
+    )
+
+    assert state["endpoints"].count("add_food") == 2
+    assert result["serving_grams"] == 40
+    m = measures_by_id(srv.foods[result["food_id"]])[result["measure_id"]]
+    assert m["value"] == 40
+
+
+def test_update_recipe_raises_if_grams_wont_stick(tmp_path):
+    class AlwaysWrongGrams(FakeFoodServer):
+        def _save(self, food):
+            resp = super()._save(food)
+            measures_by_id(self.foods[food["id"]])[313167825]["value"] = 1
+            return resp
+
+    client, state = recipe_client(tmp_path, server_cls=AlwaysWrongGrams)
+
+    with pytest.raises(CronometerError, match=r"\(1 g\) instead of .* \(50 g\)"):
+        client.update_recipe(RECIPE_ID, serving_grams=50)
+
+    assert state["endpoints"].count("add_food") == 2
+
+
+def test_create_recipe_rejects_serving_heavier_than_batch(tmp_path):
+    client, state = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[EGG]))
+
+    with pytest.raises(ValueError, match="more than the whole batch"):
+        client.create_recipe("R", ingredients=[(1234, 100)], serving_grams=100.5)
+
+    assert state["endpoints"] == []
+
+
+def test_create_recipe_allows_serving_equal_to_batch(tmp_path):
+    client, _ = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[EGG]))
+
+    result = client.create_recipe("R", ingredients=[(1234, 100)], serving_grams=100)
+
+    assert result["serving_grams"] == 100
+
+
+def test_update_recipe_rejects_serving_heavier_than_batch(tmp_path):
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match=r"153 is more than the whole batch \(152 g\)"):
+        client.update_recipe(RECIPE_ID, serving_grams=153)
+
+    assert "add_food" not in endpoints(state)
+
+
+def test_update_recipe_rejects_ingredients_that_shrink_below_serving(tmp_path):
+    """The 76 g serving no longer fits a 50 g batch."""
+    client, state = recipe_client(tmp_path)
+
+    with pytest.raises(ValueError, match="76 is more than the whole batch"):
+        client.update_recipe(RECIPE_ID, ingredients=[(1234, 50)])
+
+    assert "add_food" not in endpoints(state)

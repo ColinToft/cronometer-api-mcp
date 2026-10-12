@@ -185,14 +185,19 @@ class FakeFoodServer:
 
     add_food upserts like the real endpoint: new foods and measures get ids,
     the first measure becomes the default, new measure names are re-parsed
-    (server_reparse), and a recipe's "full recipe" weight is derived from its
-    ingredients. `save_responses` replaces the next add_food answers.
+    (server_reparse), and a recipe's "full recipe" weight and per-100g
+    nutrients are derived from its ingredients (derive_nutrients=False
+    simulates a save that derived nothing). `save_responses` replaces the
+    next add_food answers.
     """
 
-    def __init__(self, foods=(), ingredient_foods=(), save_responses=()):
+    def __init__(
+        self, foods=(), ingredient_foods=(), save_responses=(), derive_nutrients=True
+    ):
         self.foods = {f["id"]: copy.deepcopy(f) for f in foods}
         self.ingredient_foods = {f["id"]: f for f in ingredient_foods}
         self.save_responses = list(save_responses)
+        self.derive_nutrients = derive_nutrients
         self.next_id = 4242
         self.next_measure_id = 9000
 
@@ -241,9 +246,21 @@ class FakeFoodServer:
         if not food.get("defaultMeasureId"):
             food["defaultMeasureId"] = food["measures"][0]["id"]
         if food.get("ingredients"):
+            batch = sum(i["grams"] for i in food["ingredients"])
             for m in food["measures"]:
                 if m["name"] == "full recipe":
-                    m["value"] = sum(i["grams"] for i in food["ingredients"])
+                    m["value"] = batch
+            totals: dict[int, float] = {}
+            if self.derive_nutrients:
+                for i in food["ingredients"]:
+                    for n in self.ingredient_foods[i["foodId"]]["nutrients"]:
+                        totals[n["id"]] = (
+                            totals.get(n["id"], 0) + n["amount"] * i["grams"] / 100
+                        )
+            food["nutrients"] = [
+                {"id": nid, "amount": amount * 100 / batch}
+                for nid, amount in sorted(totals.items())
+            ]
         self.foods[food["id"]] = food
         return {"result": "SUCCESS", "messages": [], "id": food["id"]}
 
@@ -523,6 +540,7 @@ def test_create_recipe_payload_shape(tmp_path):
     assert result == {
         "food_id": 4242,
         "measure_id": 9000,
+        "serving_grams": 150.0,
         "total_grams": 150.0,
         "ingredient_count": 2,
     }
@@ -740,7 +758,7 @@ def _import_client(tmp_path: Path, monkeypatch, poll_bodies):
 
     state = {"calls": [], "polls": 0, "add_food": []}
     remaining = list(poll_bodies)
-    server = FakeFoodServer()
+    server = FakeFoodServer(ingredient_foods=IMPORT_INGREDIENT_FOODS)
     server.next_id = 76533895
 
     def fake_post(endpoint, json=None):

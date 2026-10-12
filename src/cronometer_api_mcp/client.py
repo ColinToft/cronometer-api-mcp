@@ -88,6 +88,8 @@ _RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
 
 # A serving name that leads with a plain number, e.g. "2 cookies".
 _QUANTITY_LED_NAME = re.compile(r"^\s*(\d+(?:\.\d+)?)\s+(\S.*)$")
+# Any leading quantity: "2 bowls", "1.5 cups", "1/2 cup", "1 1/2 cups".
+_LEADING_QUANTITY = re.compile(r"^\s*(?:\d+(?:\.\d+)?|\d+/\d+)\s+\S")
 
 # Nutrient IDs create_custom_food() already writes via its named macro args
 # (including the derived/negative-ID duplicates it sends alongside them).
@@ -869,7 +871,8 @@ class CronometerClient:
         as "400 <serving_name>" with no weight of its own. A quantity leading
         serving_name ("2 cookies") is moved into the quantity for the same
         reason. A quantity set without serving_grams keeps the total weight,
-        so the per-unit weight changes.
+        so the per-unit weight changes. (update_recipe keeps the quantity on a
+        resize instead: its servings never have this "400 g" shape.)
 
         Returns {"food_id": int, "name": str}.
         """
@@ -899,8 +902,9 @@ class CronometerClient:
             ("serving_grams", serving_grams),
             (quantity_label, serving_quantity),
         ):
-            if v is not None and not (math.isfinite(v) and v > 0):
-                raise ValueError(f"{label} must be a positive number, got {v!r}")
+            if v is not None:
+                _check_positive(label, v)
+        _check_name(name)
 
         with self._food_lock(food_id):
             food = self._get_user_food(food_id, recipe=False)
@@ -1032,8 +1036,8 @@ class CronometerClient:
                 "1.5 cups"); the app shows "<quantity> <serving_name>".
             comments: Free-text recipe notes.
 
-        Returns {"food_id", "measure_id" (the serving), "total_grams" (as the
-        server derived it), "ingredient_count"}.
+        Returns {"food_id", "measure_id" and "serving_grams" (the serving),
+        "total_grams" (as the server derived it), "ingredient_count"}.
         """
         parsed = _parse_recipe_ingredients(ingredients)
         _check_name(name)
@@ -1041,8 +1045,11 @@ class CronometerClient:
         _check_positive("serving_quantity", serving_quantity)
         if serving_grams is not None:
             _check_positive("serving_grams", serving_grams)
-        ingredient_rows = self._ingredient_rows(parsed)
         batch_grams = sum(g for _, g, _ in parsed)
+        if serving_grams is None:
+            serving_grams = batch_grams
+        _check_serving_fits(serving_grams, batch_grams)
+        ingredient_rows = self._ingredient_rows(parsed)
 
         # The first measure in the array becomes the server-assigned
         # defaultMeasureId, so the serving measure leads.
@@ -1050,7 +1057,7 @@ class CronometerClient:
             {
                 "id": 0,
                 "name": serving_name,
-                "value": batch_grams if serving_grams is None else serving_grams,
+                "value": serving_grams,
                 "amount": serving_quantity,
                 "type": "Weight",
             },
@@ -1104,13 +1111,13 @@ class CronometerClient:
                 food = self.get_food(food_id)
                 measure_id = food.get("defaultMeasureId")
                 food, serving = self._settle_recipe_serving(
-                    food, measure_id, serving_name, serving_quantity
+                    food, measure_id, serving_name, serving_quantity, serving_grams
                 )
             total_grams = _full_recipe_grams(food)
         except Exception as e:
             raise CronometerError(
-                f"Recipe {food_id} ({name!r}) was created, but checking its "
-                f"serving failed: {e}. The recipe exists; fix it with "
+                f"Recipe {food_id} ({name!r}) was created, but checking it "
+                f"failed: {e}. The recipe exists; fix it with "
                 f"update_recipe({food_id}, ...) rather than creating it again."
             ) from e
         logger.info(
@@ -1123,6 +1130,7 @@ class CronometerClient:
         return {
             "food_id": food_id,
             "measure_id": serving["id"],
+            "serving_grams": serving["value"],
             "total_grams": total_grams,
             "ingredient_count": len(ingredient_rows),
         }
@@ -1155,9 +1163,10 @@ class CronometerClient:
         return servings[0]
 
     def _settle_recipe_serving(
-        self, food: dict, measure_id: int, name: str, quantity: float
+        self, food: dict, measure_id: int, name: str, quantity: float, grams: float
     ) -> tuple[dict, dict]:
-        """Make sure the saved serving reads back as (name, quantity).
+        """Make sure the saved serving reads back as (name, quantity, grams),
+        and that the server derived the recipe's nutrients.
 
         When the server creates a measure whose amount is 1 it may re-parse the
         name ("serving (1/2 batch)" was stored as amount 0.5, name "batch)").
@@ -1177,25 +1186,33 @@ class CronometerClient:
                 raise CronometerError(
                     f"Recipe {food_id} has no measure {measure_id} after saving"
                 )
-            if serving["name"] == name and math.isclose(serving["amount"], quantity):
+            if (
+                serving["name"] == name
+                and math.isclose(serving["amount"], quantity)
+                and math.isclose(serving["value"], grams)
+            ):
+                _check_derived_nutrients(food)
                 return food, serving
             if attempt:
                 break
             logger.info(
-                "Server stored recipe %d's serving as %r x%s; re-sending %r x%s",
+                "Server stored recipe %d's serving as %r x%s (%s g); re-sending "
+                "%r x%s (%s g)",
                 food_id,
                 serving["name"],
                 serving["amount"],
+                serving["value"],
                 name,
                 quantity,
+                grams,
             )
-            serving["name"], serving["amount"] = name, quantity
+            serving.update(name=name, amount=quantity, value=grams)
             self._save_food(food)
             food = self.get_food(food_id)
         raise CronometerError(
             f"Recipe {food_id} was saved, but its serving reads back as "
-            f"{serving['name']!r} x{serving['amount']} instead of {name!r} "
-            f"x{quantity}"
+            f"{serving['name']!r} x{serving['amount']} ({serving['value']} g) "
+            f"instead of {name!r} x{quantity} ({grams} g)"
         )
 
     def update_recipe(
@@ -1216,6 +1233,9 @@ class CronometerClient:
         list; the server re-derives nutrients and the "full recipe" weight from
         it. serving_name is stored exactly as given; the serving keeps its
         weight and quantity unless serving_grams / serving_quantity are passed.
+        Unlike update_custom_food, resizing keeps the quantity: recipe servings
+        are always created with an explicit quantity, so there is no "400 g"
+        style measure whose quantity is really a gram count (#66) to reset.
         Serving-based recipes ("Recipe"-type measures) are refused.
 
         Returns the server's read-back of the batch weight and serving.
@@ -1267,6 +1287,9 @@ class CronometerClient:
                 serving["value"] = serving_grams
             if parsed is not None:
                 food["ingredients"] = self._ingredient_rows(parsed)
+            _check_serving_fits(
+                serving["value"], sum(i["grams"] for i in food["ingredients"])
+            )
 
             self._save_food(food)
             food, serving = self._settle_recipe_serving(
@@ -1274,6 +1297,7 @@ class CronometerClient:
                 serving["id"],
                 serving["name"],
                 serving["amount"],
+                serving["value"],
             )
         total_grams = _full_recipe_grams(food)
 
@@ -2148,10 +2172,17 @@ def _is_fixed_recipe_measure(name: str) -> bool:
 
 
 def _recipe_serving_name(name: str) -> str:
-    """Strip a recipe serving name; refuse blanks and built-in measure names."""
+    """Strip a recipe serving name; refuse blanks, built-in measure names, and
+    names that start with a quantity (the app would show "1 2 bowls")."""
     name = name.strip()
     if not name:
         raise ValueError("serving_name must not be empty")
+    if _LEADING_QUANTITY.match(name):
+        raise ValueError(
+            f"serving_name {name!r} starts with a quantity; pass the number as "
+            f"serving_quantity and only the unit as serving_name (e.g. "
+            f"serving_quantity=2, serving_name='bowls')"
+        )
     if _is_fixed_recipe_measure(name):
         raise ValueError(
             f"serving_name {name!r} is reserved for one of the recipe's "
@@ -2168,6 +2199,34 @@ def _check_positive(label: str, v: float) -> None:
 def _check_name(name: str | None) -> None:
     if name is not None and not name.strip():
         raise ValueError("name must not be empty")
+
+
+def _check_serving_fits(serving_grams: float, batch_grams: float) -> None:
+    """A serving can't weigh more than the whole batch.
+
+    Checked before saving against the ingredient total, which is exactly what
+    the server derives "full recipe" from (verified live), so nothing invalid
+    is written.
+    """
+    if serving_grams > batch_grams and not math.isclose(serving_grams, batch_grams):
+        raise ValueError(
+            f"serving_grams {serving_grams:g} is more than the whole batch "
+            f"({batch_grams:g} g)"
+        )
+
+
+def _check_derived_nutrients(food: dict) -> None:
+    """The client sends no nutrients, so the server must have derived them."""
+    if sum(i["grams"] for i in food.get("ingredients") or []) <= 0:
+        return
+    energy = next(
+        (n["amount"] for n in food.get("nutrients") or [] if n["id"] == 208), None
+    )
+    if energy is None or energy <= 0:
+        raise CronometerError(
+            f"Recipe {food['id']} was saved, but has no derived nutrients "
+            f"(energy {energy!r}); check its ingredients in Cronometer"
+        )
 
 
 def _full_recipe_grams(food: dict) -> float:

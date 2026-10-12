@@ -1015,9 +1015,10 @@ def add_recipe(
             Cronometer's UI; "grams" always drives the nutrition math.
         serving_name: Name of the default serving measure (default "Serving"),
             stored exactly as given, e.g. "serving (1/6 batch)". "g", "oz" and
-            "full recipe" are reserved.
-        serving_grams: Grams in one serving. Defaults to the full batch weight
-            (one serving = the whole recipe).
+            "full recipe" are reserved, and a name starting with a quantity
+            ("2 bowls") is refused: pass serving_quantity=2, serving_name="bowls".
+        serving_grams: Grams in one serving, at most the batch weight. Defaults
+            to the full batch weight (one serving = the whole recipe).
         serving_quantity: How many units the serving is (default 1); the app
             shows "<quantity> <serving_name>", e.g. 1.5 with "cups".
         comments: Free-text recipe notes.
@@ -1038,6 +1039,7 @@ def add_recipe(
             {
                 "food_id": result["food_id"],
                 "measure_id": result["measure_id"],
+                "serving_grams": result["serving_grams"],
                 "name": name,
                 "total_grams": result["total_grams"],
                 "ingredient_count": result["ingredient_count"],
@@ -1078,8 +1080,10 @@ def update_recipe(
         name: New recipe name.
         serving_name: New name for the recipe's serving, stored exactly as
             given, e.g. "serving (1/6 batch)". Its quantity and weight are
-            unchanged unless passed. "g", "oz" and "full recipe" are reserved.
-        serving_grams: New weight of the serving in grams.
+            unchanged unless passed. "g", "oz" and "full recipe" are reserved,
+            and a name starting with a quantity ("2 bowls") is refused.
+        serving_grams: New weight of the serving in grams, at most the batch
+            weight. Unlike update_custom_food, this keeps the quantity.
         serving_quantity: How many units the serving is; the app shows
             "<quantity> <serving_name>", e.g. 1.5 with "cups".
         comments: New recipe notes ("" clears them).
