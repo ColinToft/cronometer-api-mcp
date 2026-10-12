@@ -1267,11 +1267,11 @@ class CronometerClient:
         measure whose quantity is really a gram count (#66) to reset.
         Serving-based recipes ("Recipe"-type measures) are refused.
 
-        Existing diary entries: the nutrients per gram update. Entries logged
-        by the serving measure follow it, so after a resize their grams change
-        too and "1 serving" stays 1 serving (verified live: an entry's grams
-        went from 50 to 100 with the serving). Entries logged by g or oz
-        weren't tested.
+        Existing diary entries: the nutrients per gram update. After a resize,
+        entries logged by the serving measure follow it, so "1 serving" stays
+        1 serving; entries logged by "g" keep their grams. Verified live side
+        by side on one recipe: the serving entry went from 50 to 100 g and the
+        50 g entry stayed 50 g.
 
         Returns the batch weight, plus the serving as read back when it was
         resolved, and a `note` when the serving's grams changed.
@@ -1386,8 +1386,8 @@ class CronometerClient:
                 result["note"] = (
                     f"The serving changed from {grams_before:g} g to "
                     f"{serving['value']:g} g. Diary entries logged by this "
-                    f"serving follow it (their grams change too); entries logged "
-                    f"by g or oz may keep their grams, so check those days."
+                    f"serving follow it, so 1 serving is now {serving['value']:g} "
+                    f"g; entries logged by g keep their grams."
                 )
         return result
 

@@ -1663,4 +1663,7 @@ def test_note_when_serving_grams_change(tmp_path, kwargs, note):
         assert "note" not in result
     else:
         assert note in result["note"]
-        assert "Diary entries logged by this serving follow it" in result["note"]
+        assert result["note"].endswith(
+            "Diary entries logged by this serving follow it, so 1 serving is now "
+            f"{result['serving']['grams']:g} g; entries logged by g keep their grams."
+        )
