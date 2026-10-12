@@ -2282,7 +2282,7 @@ def _check_serving_fits(serving_grams: float, batch_grams: float) -> None:
     written. Within _GRAMS_TOL counts as fitting: servings_per_batch=1 on a
     523.3868 g batch rounds the serving up to 523.39 g.
     """
-    if serving_grams > batch_grams and not math.isclose(serving_grams, batch_grams):
+    if serving_grams - batch_grams > _GRAMS_TOL:
         raise ValueError(
             f"serving_grams {serving_grams:g} is more than the whole batch "
             f"({batch_grams:g} g)"
