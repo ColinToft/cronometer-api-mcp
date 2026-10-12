@@ -254,7 +254,6 @@ def test_serving_grams_resizes_default_measure_only(tmp_path):
     assert by_id[313167825] == {
         **measures_by_id(recipe())[313167825],
         "value": 50.5,
-        "amount": 1.0,
     }
     assert by_id[313167825]["type"] == "Weight"  # recipes stay weight-based
     for mid in (313167828, 313167827, 313167826):
@@ -263,6 +262,19 @@ def test_serving_grams_resizes_default_measure_only(tmp_path):
     assert data["nutrients"] == recipe()["nutrients"]
     assert data["ingredients"] == recipe()["ingredients"]
     assert result["serving"]["grams"] == 50.5
+
+
+def test_serving_grams_alone_keeps_quantity(tmp_path):
+    """Resizing "2 bowls" must not turn it into "1 bowls"."""
+    food = recipe()
+    measures_by_id(food)[313167825].update(name="bowls", amount=2)
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    result = client.update_recipe(RECIPE_ID, serving_grams=150)
+
+    m = measures_by_id(saved(state))[313167825]
+    assert (m["name"], m["amount"], m["value"]) == ("bowls", 2, 150)
+    assert result["serving"]["quantity"] == 2
 
 
 def test_serving_name_is_sent_verbatim_and_resets_quantity(tmp_path):
@@ -447,6 +459,28 @@ def test_ingredients_and_serving_together(tmp_path):
     assert result["total_grams"] == 600
 
 
+def test_ingredients_with_quantity_led_serving_and_grams(tmp_path):
+    client, state = make_cold_client(tmp_path, [recipe(), foods_response(EGG), OK])
+
+    result = client.update_recipe(
+        RECIPE_ID, ingredients=[(1234, 600)], serving_name="3 bowls", serving_grams=200
+    )
+
+    m = measures_by_id(saved(state))[313167825]
+    assert (m["name"], m["amount"], m["value"], m["type"]) == (
+        "bowls",
+        3.0,
+        200,
+        "Weight",
+    )
+    assert result["serving"] == {
+        "measure_id": 313167825,
+        "name": "bowls",
+        "quantity": 3.0,
+        "grams": 200,
+    }
+
+
 def test_recipe_without_full_recipe_measure_still_updates(tmp_path):
     """The server reports a virtual id-0 "full recipe" when none is stored."""
     food = recipe()
@@ -487,7 +521,10 @@ def test_get_food_details_ingredients_round_trip(tmp_path, monkeypatch):
             {
                 "id": 2,
                 "foodId": 1234,
-                "measureId": 3770,  # a non-gram display measure
+                # A non-gram (50 g "large") display measure. `value` still
+                # equals grams: Colin's app-made recipe stores 33 g of milk on
+                # a 100 g "cup" measure as value 33, not 0.33 (read live).
+                "measureId": 3770,
                 "translationId": 1893,
                 "grams": 100,
                 "value": 100,
@@ -659,15 +696,6 @@ def test_retire_still_refuses_database_recipes(tmp_path):
         client.retire_custom_food(RECIPE_ID)
 
     assert endpoints(state) == ["get_food"]
-
-
-def test_get_user_food_rejects_unknown_kind(tmp_path):
-    client, state = make_cold_client(tmp_path, [recipe()])
-
-    with pytest.raises(ValueError, match="Unknown food kind"):
-        client._get_user_food(RECIPE_ID, "plain")
-
-    assert state["payloads"] == []
 
 
 def test_recipe_edits_hold_the_food_lock(tmp_path):

@@ -786,29 +786,18 @@ class CronometerClient:
                 lock = self._food_locks[food_id] = threading.Lock()
             return lock
 
-    def _get_user_food(self, food_id: int, kind: str) -> dict:
-        """Fetch a user-created food, refusing anything that isn't `kind`.
+    def _get_user_food(self, food_id: int) -> dict:
+        """Fetch a food, refusing database foods (source other than "Custom").
 
-        kind is "custom_food" (no ingredients), "recipe" (has ingredients), or
-        "any". Database foods are always refused: re-sending one through
-        add_food is untested. get_food reports source "Custom" for both custom
-        foods and recipes.
+        Re-sending a database food through add_food is untested. get_food
+        reports source "Custom" for both custom foods and recipes; a recipe is
+        one with a non-empty `ingredients` array.
         """
-        if kind not in ("custom_food", "recipe", "any"):
-            raise ValueError(f"Unknown food kind {kind!r}")
         food = self.get_food(food_id)
-        label = f"Food {food_id} ({food.get('name')!r})"
         if food.get("source") != "Custom":
             raise CronometerError(
-                f"{label} is not a user-created food (source={food.get('source')!r})"
-            )
-        is_recipe = bool(food.get("ingredients"))
-        if kind == "custom_food" and is_recipe:
-            raise CronometerError(f"{label} is a recipe; use update_recipe instead")
-        if kind == "recipe" and not is_recipe:
-            raise CronometerError(
-                f"{label} is a plain custom food, not a recipe; use "
-                f"update_custom_food instead"
+                f"Food {food_id} ({food.get('name')!r}) is not a user-created "
+                f"food (source={food.get('source')!r})"
             )
         return food
 
@@ -881,7 +870,12 @@ class CronometerClient:
                 raise ValueError(f"{label} must be a positive number, got {v!r}")
 
         with self._food_lock(food_id):
-            food = self._get_user_food(food_id, "custom_food")
+            food = self._get_user_food(food_id)
+            if food.get("ingredients"):
+                raise CronometerError(
+                    f"Food {food_id} ({food.get('name')!r}) is a recipe; use "
+                    f"update_recipe instead"
+                )
 
             if name is not None:
                 old_name = food.get("name")
@@ -963,7 +957,7 @@ class CronometerClient:
         Returns {"food_id": int, "name": str, "retired": True}.
         """
         with self._food_lock(food_id):
-            food = self._get_user_food(food_id, "any")
+            food = self._get_user_food(food_id)
             food["retired"] = True
             self._save_food(food)
         logger.info("Retired custom food %r (id=%d)", food.get("name"), food_id)
@@ -1156,7 +1150,12 @@ class CronometerClient:
             raise ValueError("name must not be empty")
 
         with self._food_lock(food_id):
-            food = self._get_user_food(food_id, "recipe")
+            food = self._get_user_food(food_id)
+            if not food.get("ingredients"):
+                raise CronometerError(
+                    f"Food {food_id} ({food.get('name')!r}) is a plain custom "
+                    f"food, not a recipe; use update_custom_food instead"
+                )
 
             if any(m.get("type") == "Recipe" for m in food.get("measures") or []):
                 raise CronometerError(
@@ -1178,10 +1177,9 @@ class CronometerClient:
 
             if serving_name is not None:
                 serving["name"] = serving_name
+                serving["amount"] = quantity if quantity is not None else 1.0
             if serving_grams is not None:
                 serving["value"] = serving_grams
-            if serving_name is not None or serving_grams is not None:
-                serving["amount"] = quantity if quantity is not None else 1.0
 
             if parsed is not None:
                 food["ingredients"] = self._ingredient_rows(parsed)
