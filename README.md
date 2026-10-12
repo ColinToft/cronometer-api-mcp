@@ -141,7 +141,7 @@ cached session, so it also overrides a stale cached timezone.
 | `delete_custom_food` | Retire a custom food or recipe so it leaves search (existing diary entries are kept) |
 | `add_recipe` | Create a recipe from existing foods referenced by ID and gram weight |
 | `import_recipe` | Create a recipe from a free-text ingredient list; Cronometer matches each line to a database food and converts the amount to grams |
-| `update_recipe` | Edit a recipe in place, keeping its food ID: replace its ingredient list, rename it, change its default serving's name/weight, or its notes. Cronometer re-derives the nutrients from the new ingredients |
+| `update_recipe` | Edit a recipe in place, keeping its food ID: replace its ingredient list, rename it, change its serving's name, quantity or weight, or its notes. Cronometer re-derives the nutrients from the new ingredients |
 | `copy_day` | Copy all entries from the previous day |
 | `mark_day_complete` | Mark a diary day as complete or incomplete |
 
@@ -223,6 +223,9 @@ recipe, the server derives the nutrients and the "full recipe" weight from the `
 every save, so the client sends none. No hard-delete endpoint for foods is known, so
 `delete_custom_food` sets `retired` instead (the food leaves search after a few seconds but stays
 readable by id, and diary entries that use it are kept).
+Retired foods can't be edited. Recipe serving names are sent exactly as given with an explicit
+quantity; when the server re-parses a new measure's name (it does for some names when the quantity
+is 1, e.g. "serving (1/2 batch)"), the client re-sends the measure verbatim, which sticks.
 
 Recipe import is the one asynchronous operation: `import_recipe` returns a job id, and `poll_async_result` is polled until the server reports 100% progress and attaches the parsed ingredients.
 

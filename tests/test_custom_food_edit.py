@@ -269,13 +269,8 @@ def test_update_custom_food_serving_size_in_diary(
         ("10 pieces", {}, "pieces", 10.0),
         ("1.5 cups", {}, "cups", 1.5),
         ("2 cookies", {"serving_quantity": 3}, "cookies", 3),
-        # A leading fraction is a quantity too, as for the server's own create.
-        ("1/2 cup", {"serving_grams": 120}, "cup", 0.5),
-        ("3/4 cups", {}, "cups", 0.75),
-        # A non-positive leading number is part of the name.
+        ("1/2 cup", {"serving_grams": 120}, "1/2 cup", 1.0),
         ("0 calorie syrup", {"serving_grams": 15}, "0 calorie syrup", 1.0),
-        ("0.0 cups", {"serving_grams": 10}, "0.0 cups", 1.0),
-        ("0/2 cup", {"serving_grams": 10}, "0/2 cup", 1.0),
     ],
 )
 def test_update_custom_food_quantity_led_serving_name(
@@ -295,38 +290,16 @@ def test_update_custom_food_quantity_led_serving_name(
     )
 
 
-def test_update_custom_food_bare_rename_keeps_quantity(tmp_path):
-    """Same rule as update_recipe: "2 cookies" renamed to "biscuits" gives
-    "2 biscuits" at the same weight."""
-    food = custom_food()
-    food["measures"][0].update(name="cookies", amount=2, value=30)
-    client, state = make_cold_client(tmp_path, [food, OK])
-
-    client.update_custom_food(FOOD_ID, serving_name="biscuits")
-
-    (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["name"], measure["amount"], measure["value"], measure["type"]) == (
-        "biscuits",
-        2,
-        30,
-        "Atomic",
-    )
-
-
-def test_update_custom_food_bare_rename_of_unit_count_resets_quantity(tmp_path):
-    """A food saved as "400 g" counts grams, not portions."""
-    food = custom_food()
-    food["measures"][0].update(name="g", amount=400, value=400, type="Weight")
-    client, state = make_cold_client(tmp_path, [food, OK])
+def test_update_custom_food_serving_name_alone_keeps_quantity(tmp_path):
+    client, state = make_cold_client(tmp_path, [weight_default_food(), OK])
 
     client.update_custom_food(FOOD_ID, serving_name="portion")
 
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["name"], measure["amount"], measure["value"], measure["type"]) == (
+    assert (measure["name"], measure["amount"], measure["type"]) == (
         "portion",
-        1.0,
         400,
-        "Atomic",
+        "Weight",
     )
 
 
@@ -337,15 +310,6 @@ def test_update_custom_food_rejects_bad_serving_numbers(tmp_path, field, bad):
 
     with pytest.raises(ValueError, match=field):
         client.update_custom_food(FOOD_ID, **{field: bad})
-    assert state["payloads"] == []
-
-
-@pytest.mark.parametrize("serving_name", ["", "   "])
-def test_update_custom_food_rejects_blank_serving_name(tmp_path, serving_name):
-    client, state = make_cold_client(tmp_path, [])
-
-    with pytest.raises(ValueError, match="serving_name"):
-        client.update_custom_food(FOOD_ID, serving_name=serving_name)
     assert state["payloads"] == []
 
 
@@ -401,7 +365,7 @@ def test_update_custom_food_refuses_database_foods(tmp_path):
         tmp_path, [custom_food(source="CRDB", owner=None), OK]
     )
 
-    with pytest.raises(CronometerError, match="not a user-created food"):
+    with pytest.raises(CronometerError, match="not a custom food"):
         client.update_custom_food(FOOD_ID, name="Renamed")
 
     assert len(state["payloads"]) == 1  # only the get_food
@@ -451,7 +415,7 @@ def test_retire_custom_food_resends_food_with_retired_flag(tmp_path):
 def test_retire_custom_food_refuses_database_foods(tmp_path):
     client, state = make_cold_client(tmp_path, [custom_food(source="USDA"), OK])
 
-    with pytest.raises(CronometerError, match="not a user-created food"):
+    with pytest.raises(CronometerError, match="not a custom food"):
         client.retire_custom_food(FOOD_ID)
 
     assert len(state["payloads"]) == 1
@@ -467,6 +431,22 @@ def test_retire_custom_food_also_retires_recipes(tmp_path):
     assert data["retired"] is True
     assert data["ingredients"] == recipe()["ingredients"]
     assert result == {"food_id": FOOD_ID, "name": "Test Recipe", "retired": True}
+
+
+def test_update_custom_food_refuses_retired_foods(tmp_path):
+    client, state = make_cold_client(tmp_path, [custom_food(retired=True), OK])
+
+    with pytest.raises(CronometerError, match="deleted"):
+        client.update_custom_food(FOOD_ID, name="X")
+
+    assert len(state["payloads"]) == 1
+
+
+def test_retire_custom_food_accepts_already_retired_foods(tmp_path):
+    client, state = make_cold_client(tmp_path, [custom_food(retired=True), OK])
+
+    assert client.retire_custom_food(FOOD_ID)["retired"] is True
+    assert state["payloads"][1]["data"]["retired"] is True
 
 
 # ---------------------------------------------------------------------------
