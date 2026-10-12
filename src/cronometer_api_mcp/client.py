@@ -138,10 +138,6 @@ class CronometerError(Exception):
     """Raised when a Cronometer API call fails."""
 
 
-class RecipeNotDerivedError(CronometerError):
-    """A recipe saved, but the server returned no derived nutrients for it."""
-
-
 def _totp_code(secret: str, for_time: float | None = None) -> str:
     """Current RFC 6238 TOTP code (SHA-1, 30 s period, 6 digits) for `secret`.
 
@@ -1024,8 +1020,8 @@ class CronometerClient:
         ingredients on every save (verified live with `nutrients: []`), so
         none are sent.
 
-        This creates a *weight-based* recipe: measures are type "Weight" and
-        nutrients are stored per-100g, matching create_custom_food's convention.
+        This creates a *weight-based* recipe: measures are type "Weight", and
+        the nutrients the server derives are stored per-100g.
         (Cronometer's other mode, "serving-based", uses type "Recipe" measures
         and stores nutrients per full batch, which makes the diary's `grams`
         field a serving count instead of real grams -- see
@@ -1127,31 +1123,25 @@ class CronometerClient:
                 food, serving = self._settle_recipe_serving(
                     food, measure_id, serving_name, serving_quantity, serving_grams
                 )
-        except RecipeNotDerivedError as e:
-            raise RecipeNotDerivedError(
-                f"Recipe {name!r} was created, but the server returned no derived "
-                f"nutrients for it. The recipe exists (id {food_id}); don't "
-                f"re-create it. Check its ingredients in the Cronometer app."
-            ) from e
-        except CronometerError as e:
+        except Exception as e:
+            # Anything here (timeouts, 5xx, a malformed read-back) happens after
+            # the recipe exists, and recipes can't be hard-deleted, so the id
+            # must reach the caller to prevent a duplicate.
             raise CronometerError(
-                f"Recipe {name!r} was created, but checking it failed: {e}. The "
-                f"recipe exists (id {food_id}); don't re-create it. Check its "
-                f"serving in the Cronometer app."
+                f"The recipe exists (id {food_id}); don't re-create it. {e}"
             ) from e
-        total_grams = batch_grams
         logger.info(
             "Created recipe %r (id=%d, %d ingredients, %.1fg batch)",
             name,
             food_id,
             len(ingredient_rows),
-            total_grams,
+            batch_grams,
         )
         return {
             "food_id": food_id,
             "measure_id": serving["id"],
             "serving_grams": serving["value"],
-            "total_grams": total_grams,
+            "total_grams": batch_grams,
             "ingredient_count": len(ingredient_rows),
         }
 
@@ -1160,20 +1150,27 @@ class CronometerClient:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _recipe_serving(food: dict) -> dict:
+    def _recipe_serving(food: dict, *, editing: bool) -> dict:
         """The recipe's serving measure: its one non-fixed measure.
 
         Not simply the default measure: logging a recipe with another measure
         makes that one the default (seen live: logging by "g" made "g" the
-        default).
+        default). When the serving is being edited and the recipe has several
+        non-fixed measures, which one to edit is ambiguous, so that's refused.
         """
         measures = food.get("measures") or []
+        servings = [m for m in measures if not _is_fixed_recipe_measure(m["name"])]
+        if editing and len(servings) > 1:
+            raise CronometerError(
+                f"Recipe {food.get('id')} has several servings "
+                f"{[m['name'] for m in servings]}, so it's ambiguous which one to "
+                f"edit; change it in the Cronometer app"
+            )
         default = next(
             (m for m in measures if m.get("id") == food.get("defaultMeasureId")), None
         )
         if default is not None and not _is_fixed_recipe_measure(default["name"]):
             return default
-        servings = [m for m in measures if not _is_fixed_recipe_measure(m["name"])]
         if len(servings) != 1:
             raise CronometerError(
                 f"Can't tell which measure is recipe {food.get('id')}'s serving: "
@@ -1287,7 +1284,18 @@ class CronometerClient:
 
         with self._food_lock(food_id):
             food = self._get_user_food(food_id, recipe=True)
-            serving = self._recipe_serving(food)
+            serving = self._recipe_serving(
+                food,
+                editing=any(
+                    v is not None
+                    for v in (
+                        serving_name,
+                        serving_grams,
+                        servings_per_batch,
+                        serving_quantity,
+                    )
+                ),
+            )
             servings_before = _ingredient_grams(food) / serving["value"]
 
             self._rename(food, name)
@@ -2254,7 +2262,7 @@ def _check_derived_nutrients(food: dict) -> None:
         None,
     )
     if energy is None:
-        raise RecipeNotDerivedError(
+        raise CronometerError(
             f"Recipe {food['id']} was saved, but the server returned no derived "
             f"nutrients for it"
         )

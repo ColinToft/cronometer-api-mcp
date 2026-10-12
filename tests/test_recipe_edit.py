@@ -9,11 +9,12 @@ import copy
 import json
 import math
 
+import httpx
 import pytest
 from test_client import FakeFoodServer, make_server_client, server_reparse
 
 from cronometer_api_mcp import server
-from cronometer_api_mcp.client import CronometerError, RecipeNotDerivedError
+from cronometer_api_mcp.client import CronometerError
 
 RECIPE_ID = 85008439
 OK = {"result": "SUCCESS", "messages": [], "id": RECIPE_ID}
@@ -402,18 +403,43 @@ def test_ambiguous_serving_raises(tmp_path):
     assert endpoints(state) == ["get_food"]
 
 
-def test_non_fixed_default_wins_over_other_servings(tmp_path):
-    food = recipe()
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"serving_grams": 80},
+        {"serving_name": "cup"},
+        {"serving_quantity": 2},
+        {"servings_per_batch": 2},
+    ],
+)
+@pytest.mark.parametrize("default", [313167825, 5, 313167826])
+def test_serving_edit_refused_when_recipe_has_several_servings(
+    tmp_path, kwargs, default
+):
+    """Whatever the default measure, two non-fixed measures make a serving
+    edit ambiguous."""
+    food = recipe(defaultMeasureId=default)
     food["measures"].append(
-        {"id": 5, "name": "bowl", "amount": 1, "value": 300, "type": "Weight"}
+        {"id": 5, "name": "bowl", "amount": 1, "value": 100, "type": "Weight"}
     )
     client, state = recipe_client(tmp_path, food)
 
-    client.update_recipe(RECIPE_ID, serving_grams=80)
+    with pytest.raises(CronometerError, match="several servings.*ambiguous"):
+        client.update_recipe(RECIPE_ID, **kwargs)
 
-    by_id = measures_by_id(saved(state))
-    assert by_id[313167825]["value"] == 80
-    assert by_id[5]["value"] == 300
+    assert endpoints(state) == ["get_food"]
+
+
+def test_several_servings_still_allow_non_serving_edits(tmp_path):
+    food = recipe()
+    food["measures"].append(
+        {"id": 5, "name": "bowl", "amount": 1, "value": 100, "type": "Weight"}
+    )
+    client, state = recipe_client(tmp_path, food)
+
+    client.update_recipe(RECIPE_ID, name="Renamed")
+
+    assert saved(state)["name"] == "Renamed"
 
 
 def test_missing_default_measure_uses_sole_serving(tmp_path):
@@ -909,7 +935,7 @@ def test_create_recipe_read_back_failure_names_the_created_recipe(tmp_path):
 
     with pytest.raises(
         CronometerError,
-        match=r"Recipe 'R' was created.*boom.*exists \(id 4242\); don't re-create",
+        match=r"^The recipe exists \(id 4242\); don't re-create it. boom$",
     ):
         client.create_recipe("R", ingredients=[(1234, 100)])
 
@@ -1171,26 +1197,61 @@ def test_names_without_a_leading_quantity_are_accepted(tmp_path, serving_name):
 
 
 def test_create_recipe_raises_when_no_nutrients_were_derived(tmp_path):
-    """The recipe exists, and update_recipe can't fix derivation, so the
-    advice is to check the ingredients in the app."""
     srv = FakeFoodServer(ingredient_foods=[EGG], derive_nutrients=False)
     client, state = make_server_client(tmp_path, srv)
 
-    with pytest.raises(RecipeNotDerivedError) as err:
+    with pytest.raises(CronometerError) as err:
         client.create_recipe("R", ingredients=[(1234, 100)])
 
     msg = str(err.value)
-    assert "Recipe 'R' was created" in msg
+    assert msg.startswith("The recipe exists (id 4242); don't re-create it.")
     assert "returned no derived nutrients" in msg
-    assert "The recipe exists (id 4242); don't re-create it" in msg
-    assert "Check its ingredients in the Cronometer app" in msg
-    assert "update_recipe" not in msg
     assert state["endpoints"].count("add_food") == 1
     assert list(srv.foods) == [4242]  # exactly one recipe created
 
 
+def test_create_recipe_timeout_after_create_names_the_one_recipe(tmp_path):
+    """A transport error after the save must still carry the id: recipes
+    can't be hard-deleted, so a retry would leave a duplicate."""
+    timeout = httpx.ReadTimeout("read timed out")
+
+    class SlowServer(FakeFoodServer):
+        def handle(self, endpoint, body):
+            if endpoint == "/api/v2/get_food":
+                raise timeout
+            return super().handle(endpoint, body)
+
+    srv = SlowServer(ingredient_foods=[EGG])
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError) as err:
+        client.create_recipe("R", ingredients=[(1234, 100)])
+
+    assert str(err.value) == (
+        "The recipe exists (id 4242); don't re-create it. read timed out"
+    )
+    assert err.value.__cause__ is timeout
+    assert state["endpoints"].count("add_food") == 1
+    assert list(srv.foods) == [4242]
+
+
+def test_create_recipe_malformed_read_back_names_the_recipe(tmp_path):
+    class BrokenServer(FakeFoodServer):
+        def handle(self, endpoint, body):
+            out = super().handle(endpoint, body)
+            if endpoint == "/api/v2/get_food":
+                out.pop("id")  # a KeyError in the read-back, not a CronometerError
+            return out
+
+    client, _ = make_server_client(tmp_path, BrokenServer(ingredient_foods=[EGG]))
+
+    with pytest.raises(CronometerError, match=r"^The recipe exists \(id 4242\)") as err:
+        client.create_recipe("R", ingredients=[(1234, 100)])
+
+    assert isinstance(err.value.__cause__, KeyError)
+
+
 def test_create_recipe_post_create_failure_names_the_one_recipe(tmp_path):
-    """Any other failure after the save points at update_recipe for that id."""
     srv = StubbornServer(ingredient_foods=[EGG])
     client, state = make_server_client(tmp_path, srv)
 
@@ -1200,10 +1261,9 @@ def test_create_recipe_post_create_failure_names_the_one_recipe(tmp_path):
         )
 
     msg = str(err.value)
-    assert "Recipe 'R' was created" in msg
-    assert "The recipe exists (id 4242); don't re-create it" in msg
+    assert msg.startswith("The recipe exists (id 4242); don't re-create it.")
+    assert "reads back as 'batch)'" in msg
     assert "update_recipe" not in msg  # it goes through the same settle
-    assert not isinstance(err.value, RecipeNotDerivedError)
     assert list(srv.foods) == [4242]  # the re-send edited it, nothing new
     assert state["endpoints"].count("add_food") == 2
 
@@ -1215,7 +1275,7 @@ def test_update_recipe_raises_when_no_nutrients_were_derived(tmp_path):
     client, _ = make_server_client(tmp_path, srv)
 
     with pytest.raises(
-        RecipeNotDerivedError,
+        CronometerError,
         match=rf"Recipe {RECIPE_ID} was saved, but the server returned no derived",
     ):
         client.update_recipe(RECIPE_ID, name="X")
