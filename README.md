@@ -119,6 +119,7 @@ cached session, so it also overrides a stale cached timezone.
 |------|-------------|
 | `get_food_log` | Diary entries for a date, each enriched with food name, source, serving measure/count, and that food's per-entry nutrient contribution, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient |
 | `get_daily_nutrition` | Consumed macro and micronutrient totals for every nutrient tracked in Cronometer |
+| `get_nutrient_sources` | Top foods behind one or more nutrient totals (e.g. "where did my sodium come from?"): total, split by diary group, and ranked sources with grams eaten, amount, and percent, aggregated across entries and days. A compact alternative to scanning `get_food_log` |
 | `get_nutrition_scores` | Category scores (Vitamins, Minerals, etc.) with per-nutrient consumed amounts and confidence levels |
 
 ### Food Search & Details
@@ -156,12 +157,12 @@ All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
 ### Relative dates and recent days
 
-`get_food_log`, `get_daily_nutrition`, and `get_nutrition_scores` also accept
+`get_food_log`, `get_daily_nutrition`, `get_nutrient_sources`, and `get_nutrition_scores` also accept
 `"today"`, `"yesterday"`, and `"N days ago"` as their `date`. These are resolved
 at call time using your Cronometer account timezone, so Claude can pass relative
 inputs without relying on dates from earlier in a long conversation.
 
-`get_food_log` and `get_daily_nutrition` accept `days` (1–31, default 1), counting
+`get_food_log`, `get_daily_nutrition`, and `get_nutrient_sources` accept `days` (1–31, default 1), counting
 back from the inclusive end `date`:
 
 ```python
@@ -170,11 +171,15 @@ get_nutrition_scores(date="3 days ago")
 get_daily_nutrition(days=3)  # Last 3 days, including today
 get_daily_nutrition(date="yesterday", days=3)  # Previous 3 complete calendar days
 get_food_log(days=7)  # Recent meals, including today
+get_nutrient_sources("sodium", date="yesterday")  # Yesterday's top sodium sources
+get_nutrient_sources(["protein", "fiber"], days=7, top_n=5)
 ```
 
 For “my calories the last few days,” use `get_daily_nutrition(days=3)`.
 Single-day responses retain their existing shape. Multi-day responses contain
 `start_date`, `end_date`, and a `days` list of daily results, oldest first.
+`get_nutrient_sources` is the exception: it aggregates the whole range into one
+ranking, so a multi-day response has `start_date` and `end_date` but no `days` list.
 Returned dates are always concrete `YYYY-MM-DD` values.
 
 ## Transport
