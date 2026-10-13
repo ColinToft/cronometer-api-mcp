@@ -91,8 +91,8 @@ _RECIPE_FIXED_MEASURES = _WEIGHT_UNIT_MEASURES | {_FULL_RECIPE_MEASURE}
 #
 # The server stores a diary entry as a count of its measure, and reports its
 # grams as count x the measure's value for "Weight", but count x 100 for
-# "Atomic" (whatever its value). Logging by grams is right either way: the
-# count is derived by the same rule. Editing a measure later re-reads every
+# "Atomic" (whatever its value). Logging by grams, as this client does, is
+# right either way: the count is derived by the same rule. Editing a measure later re-reads every
 # entry logged by it (verified live, Oct 13, 2026): resizing a Weight measure
 # rescales those entries, resizing an Atomic one doesn't, and switching a
 # measure's type multiplies them by value/100 (Atomic to Weight) or 100/value
@@ -2481,9 +2481,9 @@ def _check_recipe_ingredient(food: dict) -> None:
         f"its measures {[(m['name'], m['type']) for m in others]} aren't type "
         f"'Weight', and Cronometer leaves such a food's grams out of a "
         f"recipe's batch weight, which would inflate its per-100 g nutrients. "
-        f"Don't switch a measure's type to fix this: Cronometer would rescale "
-        f"every diary entry logged by it (x value/100). Make a new custom food "
-        f"for recipes instead"
+        f"If it's your own food, don't switch an 'Atomic' measure to 'Weight' "
+        f"to fix this: Cronometer re-reads every diary entry logged by it at "
+        f"value/100 of its grams. Make a new custom food for recipes instead"
     )
 
 

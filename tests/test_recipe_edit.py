@@ -1847,7 +1847,7 @@ def test_create_recipe_refuses_unweighable_ingredient_before_saving(tmp_path, fo
         f"Food {LEGACY_ID} ('ZZ custom') can't be a recipe ingredient: its measures"
     )
     assert "leaves such a food's grams out of a recipe's batch weight" in msg
-    assert "Don't switch a measure's type to fix this" in msg
+    assert "don't switch an 'Atomic' measure to 'Weight'" in msg
     assert state["endpoints"] == ["get_foods"]  # nothing created
     assert srv.foods == {}
 
