@@ -10,7 +10,6 @@ import pytest
 from cronometer_api_mcp import server
 from cronometer_api_mcp.client import NUTRIENT_IDS, CronometerClient
 
-# The method each multi-day read tool calls once per day.
 DAY_METHOD = {
     server.get_food_log: "get_diary",
     server.get_daily_nutrition: "get_consumed_nutrients",

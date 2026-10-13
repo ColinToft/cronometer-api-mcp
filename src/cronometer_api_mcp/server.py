@@ -210,13 +210,10 @@ def get_food_log(
     days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
     nutrients: list[str] | str | None = None,
 ) -> str:
-    """Get diary entries for one day or the last N calendar days.
+    """Get diary entries for reviewing or editing one day or the last N days.
 
-    Prefer relative inputs for relative questions, rather than dates calculated
-    from conversation history. For nutrient totals without individual entries,
-    prefer get_daily_nutrition(days=N); for the foods behind a total, use
-    get_nutrient_sources; for a food's full nutrient profile, get_food_details.
-
+    Each entry carries a few key nutrients; for a food's full profile use
+    get_food_details, and for every tracked nutrient get_daily_nutrition.
     Each food entry has:
 
       - serving_id: the entry's ID, for remove_food_entries
@@ -228,26 +225,20 @@ def get_food_log(
       - measure and quantity: the amount in the logged measure, e.g.
         3 "large"; both null if the food no longer has that measure, and
         quantity null if the measure has no usable weight
-      - nutrients: {name: amount} for this entry; a nutrient the food has no
-        data for is left out
+      - nutrients: {name: amount}; a nutrient the food has no data for is
+        left out
 
-    Per day it also returns:
-
-      - complete: whether the day is marked complete (see mark_day_complete)
-      - energy_summary: total_target_kcal (the day's calorie target),
-        consumed_kcal, and remaining_kcal (target minus consumed). Always
-        report remaining_kcal when summarizing the user's day. Null if the
-        day has no target.
-      - totals: each reported nutrient summed over the day's foods
-      - units: {name: unit} for the reported nutrients
-      - other_entries: non-food entries (exercise, biometrics) as the API
-        sends them
+    Per day it also returns complete (marked complete or not), totals (each
+    nutrient summed over the day's foods), units ({name: unit}),
+    other_entries: non-food entries (exercise, biometrics) as the API sends
+    them, and energy_summary: total_target_kcal, consumed_kcal, and
+    remaining_kcal (always report it when summarizing a day).
 
     Args:
         date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
               Defaults to today in the account timezone, resolved at call time.
-        days: Number of calendar days, 1–31 (default 1). Includes the end date;
-              days=3 includes today, date='yesterday', days=3 excludes today.
+              Prefer relative inputs over dates computed from the conversation.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date.
         nutrients: Nutrient names to report instead of the default Energy,
             Protein, Fat, Saturated, Carbs, Fiber, Sodium, Calcium. Matched
             as in get_nutrient_sources, e.g. ["Energy", "Iron", "B12"].
