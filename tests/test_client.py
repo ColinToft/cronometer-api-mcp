@@ -481,7 +481,7 @@ SAMPLE_DIARY = {
         {
             "type": "Serving",
             "foodId": 200,
-            "measureId": 999,  # unknown measure -> falls back to default
+            "measureId": 999,  # a measure the food no longer has
             "grams": 50,
             "order": 65538,
         },
@@ -553,10 +553,9 @@ def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
     assert oats["nutrients"] == {208: 778.0, 203: 33.8}
 
     milk = entries[1]
-    # unknown measureId 999 -> fell back to defaultMeasureId 20
-    assert milk["serving_size"]["measure_id"] == 20
-    assert milk["serving_size"]["unit"] == "glass"
-    # 42 kcal/100g scaled to 50g -> 21
+    # Measure 999 is gone: no serving (not the default's), still per 100 g.
+    assert "serving_size" not in milk
+    assert "servings" not in milk
     assert milk["nutrients"] == {208: 21.0}
 
     recipe = entries[2]
@@ -603,13 +602,131 @@ def test_enrich_diary_measure_quantity(
     monkeypatch.setattr(client, "get_foods", lambda ids: [food])
 
     out = client.enrich_diary_servings(
-        {"diary": [{"type": "Serving", "foodId": 100, "measureId": 999, "grams": 60}]}
+        {"diary": [{"type": "Serving", "foodId": 100, "measureId": 10, "grams": 60}]}
     )
 
     entry = out["diary"][0]
     assert entry["serving_size"]["quantity"] == expected_quantity
     assert entry["serving_size"]["grams"] == value
     assert entry["servings"] == servings
+
+
+# The serving-based recipe probed live; expected kcal are the server's own.
+LIVE_SERVING_RECIPE = {
+    "id": 85100983,
+    "name": "ZZ test serving recipe",
+    "defaultMeasureId": 313595231,
+    "measures": [
+        {"id": 313595763, "name": "g", "value": 200, "amount": 1, "type": "Recipe"},
+        {"id": 313595231, "name": "full recipe", "value": 4, "amount": 1,
+         "type": "Recipe"},
+        {"id": 313595764, "name": "portion", "value": 1, "amount": 1,
+         "type": "Recipe"},
+    ],
+    "nutrients": [{"id": 208, "amount": 71.5}],
+}  # fmt: skip
+
+
+def _enrich_one(tmp_path, food, measure_id, grams):
+    client = _enrich_client(tmp_path)
+    client.get_foods = lambda ids: [food]  # type: ignore[method-assign]
+    entry = {
+        "type": "Serving",
+        "servingId": 7,
+        "foodId": food["id"],
+        "measureId": measure_id,
+        "grams": grams,
+    }
+    return client.enrich_diary_servings({"diary": [entry]})["diary"][0]
+
+
+@pytest.mark.parametrize(
+    ("measure_id", "grams", "server_kcal"),
+    [
+        (313595763, 1.5, 0.5362),  # moved onto "g" when "serving" was deleted
+        (313595231, 4, 71.5),  # "full recipe", value 4
+        (313595764, 2, 143.0),  # value 1: grams is a serving count
+    ],
+)
+def test_enrich_recipe_scales_by_the_measure_value_like_the_server(
+    tmp_path, measure_id, grams, server_kcal
+):
+    entry = _enrich_one(tmp_path, LIVE_SERVING_RECIPE, measure_id, grams)
+
+    assert entry["nutrients"][208] == pytest.approx(server_kcal, abs=1e-4)
+    assert entry["serving_size"]["grams"] is None
+    assert entry["recipe"] is True
+    assert entry["servings"] == grams
+
+
+@pytest.mark.parametrize("measure_id", [0, 999, 313595230])
+def test_enrich_recipe_entry_without_its_measure_raises(tmp_path, measure_id):
+    # Live, measure 0 counted 71.5 * 2 / 200, not the default's 71.5 * 2 / 4.
+    with pytest.raises(CronometerError, match=f"measure {measure_id}, which"):
+        _enrich_one(tmp_path, LIVE_SERVING_RECIPE, measure_id, 2)
+
+
+@pytest.mark.parametrize("value", [0, -1, None, "1", float("nan"), float("inf")])
+def test_enrich_recipe_measure_without_a_usable_value_raises(tmp_path, value):
+    food = {
+        **LIVE_SERVING_RECIPE,
+        "measures": [{"id": 1, "name": "bowl", "value": value, "type": "Recipe"}],
+    }
+
+    with pytest.raises(CronometerError, match="no usable value"):
+        _enrich_one(tmp_path, food, 1, 2)
+
+
+def test_enrich_mixed_recipe_and_weight_measures_raises(tmp_path):
+    food = {
+        **LIVE_SERVING_RECIPE,
+        "measures": [
+            *LIVE_SERVING_RECIPE["measures"],
+            {"id": 5, "name": "oz", "value": 28.35, "type": "Weight"},
+        ],
+    }
+
+    with pytest.raises(CronometerError, match="mixes Recipe"):
+        _enrich_one(tmp_path, food, 5, 28.35)
+
+
+@pytest.mark.parametrize("measure_id", [0, 999])
+@pytest.mark.parametrize("default", [0, 10, 999])
+def test_enrich_weight_entry_without_its_measure_ignores_the_default(
+    tmp_path, measure_id, default
+):
+    # Live, such entries counted per 100 g.
+    food = {
+        "id": 100,
+        "name": "Bar",
+        "defaultMeasureId": default,
+        "measures": [{"id": 10, "name": "chunk", "value": 40, "type": "Atomic"}],
+        "nutrients": [{"id": 208, "amount": 400}],
+    }
+
+    entry = _enrich_one(tmp_path, food, measure_id, 30)
+
+    assert "serving_size" not in entry
+    assert "servings" not in entry
+    assert entry["nutrients"] == {208: 120.0}
+
+
+@pytest.mark.parametrize("measures", [[], [{"id": 10, "name": "x", "value": 40}]])
+def test_enrich_food_without_recipe_measures_is_per_100g(tmp_path, measures):
+    food = {"id": 100, "name": "Bar", "measures": measures,
+            "nutrients": [{"id": 208, "amount": 400}]}  # fmt: skip
+
+    entry = _enrich_one(tmp_path, food, 10, 30)
+
+    assert entry["recipe"] is False
+    assert entry["nutrients"] == {208: 120.0}
+
+
+def test_enrich_recipe_entry_ignores_the_default_measure(tmp_path):
+    entry = _enrich_one(tmp_path, LIVE_SERVING_RECIPE, 313595764, 1)
+
+    assert entry["serving_size"]["unit"] == "portion"
+    assert entry["nutrients"] == {208: 71.5}
 
 
 def test_enrich_diary_raises_when_get_foods_fails(tmp_path):
@@ -626,16 +743,15 @@ def test_enrich_diary_raises_when_get_foods_fails(tmp_path):
         )
 
 
-def test_enrich_diary_leaves_foods_get_foods_omits_bare(tmp_path):
-    client = _enrich_client(tmp_path)
-    client.get_foods = lambda ids: SAMPLE_FOODS[1:]  # type: ignore[method-assign]
-
-    out = client.enrich_diary_servings(
-        {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+def test_enrich_diary_unknown_food_raises_the_not_found_error(tmp_path):
+    client, _ = make_server_client(
+        tmp_path, FakeFoodServer(ingredient_foods=SAMPLE_FOODS[1:])
     )
 
-    assert out["diary"][0] == SAMPLE_DIARY["diary"][0]
-    assert out["diary"][1]["nutrients"] == {208: 21.0}
+    with pytest.raises(CronometerError, match=r"doGetFoods\(\): Food 100 not found$"):
+        client.enrich_diary_servings(
+            {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+        )
 
 
 # ---------------------------------------------------------------------------
