@@ -1990,14 +1990,14 @@ class CronometerClient:
             Recipe measures have null grams: their value is a reference-serving
             count, not a gram weight.
           - servings: number of those portions consumed, when derivable
-          - nutrients: {nutrient_id: amount}, the food's profile scaled to the
-            entry's amount (per-100g for Weight/Atomic measures, per-serving
-            for Recipe measures)
+          - nutrients: the food's nutrient profile scaled to the entry's amount
+            (per-100g for Weight/Atomic measures, per-serving for Recipe
+            measures), as {nutrient_id: amount}
 
-        A get_foods failure raises. A food that get_foods doesn't return leaves
-        its entries without name/nutrients, for the caller to reject. The diary
-        dict is mutated in place and also returned. Non-Serving entries
-        (Exercise, Biometric) already carry a name and are left untouched.
+        A get_foods failure raises. If a food is not
+        returned, the corresponding entries are left unchanged. The diary dict
+        is mutated in place and also returned. Non-Serving entries (Exercise,
+        Biometric) already carry a name and are left untouched.
         """
         if not isinstance(diary, dict):
             return diary
