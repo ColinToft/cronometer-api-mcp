@@ -648,10 +648,11 @@ def test_recipe_without_full_recipe_measure_still_updates(tmp_path):
 def test_missing_ingredient_food_raises_before_saving(tmp_path):
     client, state = recipe_client(tmp_path)
 
-    with pytest.raises(CronometerError, match=r"not found: \[9999\]"):
+    with pytest.raises(CronometerError, match=r"doGetFoods\(\): Food 9999 not found$"):
         client.update_recipe(RECIPE_ID, ingredients=[(1234, 100), (9999, 10)])
 
     assert "add_food" not in endpoints(state)
+    assert endpoints(state).count("get_foods") == 1  # not retried as auth
 
 
 def test_get_food_details_ingredients_round_trip(tmp_path, monkeypatch):

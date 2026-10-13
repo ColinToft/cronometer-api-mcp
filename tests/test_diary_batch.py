@@ -236,9 +236,13 @@ def test_add_refuses_an_unknown_food_before_logging(fake):
     f = fake()
     result = _add([_item(), _item(food_id=999)])
 
-    assert result["status"] == "error"
-    assert "entries[1]: food_id 999 not found" in result["message"]
+    assert result == {
+        "status": "error",
+        "message": "CronometerError: Cronometer API error: "
+        "WebServiceV2 doGetFoods(): Food 999 not found",
+    }
     assert f.state["endpoints"] == ["get_foods"]
+    assert f.diary == {}
 
 
 def test_add_refuses_a_measure_of_another_food_before_logging(fake):
@@ -420,7 +424,7 @@ def test_add_food_entry_refuses_an_unknown_food(fake):
     result = _add_one(food_id=999, diary_group="lunch")
 
     assert result["status"] == "error"
-    assert "food_id 999 not found" in result["message"]
+    assert "Food 999 not found" in result["message"]
     assert f.state["endpoints"] == ["get_foods"]
     assert f.diary == {}
 

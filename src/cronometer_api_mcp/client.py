@@ -443,6 +443,11 @@ class CronometerClient:
         # session comes back as {"result": "FAIL", "error": "..."}; "FAILURE" is
         # kept defensively (never observed in real traffic, but harmless).
         if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
+            # Only a handler that ran for an authenticated user attaches the
+            # account's sync "messages" (e.g. "Food 999 not found"); no auth
+            # FAIL seen live has them, so re-login can't fix these.
+            if "messages" in data:
+                raise CronometerError(f"Cronometer API error: {data['error']}")
             if not _retried:
                 logger.warning("Cronometer request failed, re-authenticating: %s", data)
                 self._reauthenticate(sent_token)
@@ -638,14 +643,16 @@ class CronometerClient:
         objects, each with keys: id, name, source, measures, defaultMeasureId,
         nutrients, etc. Nutrient amounts are stored per-100g.
 
-        Returns an empty list if food_ids is empty.
+        Returns an empty list if food_ids is empty. An unknown ID fails the
+        whole call with a CronometerError ending "Food <id> not found" (the
+        API names only the first unknown ID), so every requested food is
+        returned.
         """
         if not food_ids:
             return []
         payload = {"ids": list(food_ids), "config": {"call_version": 1}}
-        data = self._request("/api/v2/get_foods", payload)
-        foods = data.get("foods", []) if isinstance(data, dict) else []
-        logger.info("Batch-fetched %d/%d foods", len(foods), len(food_ids))
+        foods = self._request("/api/v2/get_foods", payload)["foods"]
+        logger.info("Batch-fetched %d foods", len(foods))
         return foods
 
     # ------------------------------------------------------------------
@@ -1457,10 +1464,7 @@ class CronometerClient:
         fresh row ids (verified live).
         """
         foods = self.get_foods([fid for fid, _, _ in parsed])
-        food_by_id = {f.get("id"): f for f in foods if isinstance(f, dict)}
-        missing = [fid for fid, _, _ in parsed if fid not in food_by_id]
-        if missing:
-            raise CronometerError(f"Ingredient food IDs not found: {missing}")
+        food_by_id = {f["id"]: f for f in foods}
 
         rows = []
         for food_id, grams, measure_id in parsed:
