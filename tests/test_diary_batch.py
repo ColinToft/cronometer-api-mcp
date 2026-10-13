@@ -233,8 +233,6 @@ def test_add_logs_a_gram_only_custom_food(fake):
 
 
 def test_add_refuses_an_unknown_food_before_logging(fake):
-    """get_foods fails the whole call for an unknown id; the error names it,
-    nothing is logged, and the not-found FAIL isn't retried as an auth one."""
     f = fake()
     result = _add([_item(), _item(food_id=999)])
 

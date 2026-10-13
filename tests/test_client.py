@@ -25,27 +25,19 @@ REAL_FAIL_BODY = {"result": "FAIL", "error": "Token Authorization failed"}
 # Synthetic/defensive variant. Never observed in real traffic, but the
 # client keeps handling it just in case some endpoint uses it.
 SYNTHETIC_FAILURE_BODY = {"result": "FAILURE", "error": "synthetic"}
-# Real auth failure for a bogus or null token, or a valid token sent with
-# another userId (all captured live, Oct 2026). Like REAL_FAIL_BODY, no
-# "messages".
+# Captured live (Oct 2026): bogus/null token or wrong userId, then two
+# pre-dispatch errors. None carry "messages", unlike a handler's FAIL.
 AUTH_FAILED_BODY = {"result": "FAIL", "error": "Authentication Failed"}
-# Real pre-dispatch failures (captured live): no "messages" either, so they
-# can't be told apart from auth failures and still re-authenticate.
 INVALID_COMMAND_BODY = {"result": "FAIL", "error": "Invalid Command"}
 BAD_PAYLOAD_BODY = {"result": "FAIL", "error": 'JSONObject["ids"] not found.'}
-# The account's pending sync messages, which the server attaches to every
-# response of a handler that ran, FAILs included (captured live).
 SYNC_MESSAGES = [
     {"text": '{"id":85096127,"type":"ADD"}', "id": 20043751833, "type": "FOOD_CHANGED"}
 ]
 
 
 def not_found_body(endpoint: str, food_id: int, messages=()) -> dict:
-    """The real FAIL body get_food / get_foods return for an unknown food id.
-
-    get_foods fails the whole call (naming only the first unknown id) rather
-    than leaving the food out. Captured live, Oct 2026.
-    """
+    """The real (live-captured) FAIL for an unknown id; get_foods names only
+    the first unknown id."""
     where = {
         "/api/v2/get_food": "doGetFood()",
         "/api/v2/get_foods": "WebServiceV2 doGetFoods()",
@@ -190,8 +182,7 @@ def test_fail_without_messages_reauthenticates(tmp_path, body):
     ids=["foods-with-sync", "foods-empty", "food", "missing-id", "failure"],
 )
 def test_fail_with_messages_raises_without_reauthenticating(tmp_path, body):
-    """A FAIL carrying "messages" came from a handler that ran for an
-    authenticated user: raise its error as-is, keep the session, send once."""
+    """A handler's FAIL raises its error as-is: no re-login, session kept."""
     session_path = tmp_path / "session.json"
     session_path.write_text('{"username": "", "user_id": 123, "token": "STALE"}')
     client, state = make_client(tmp_path, [body, {"result": "SUCCESS"}])
@@ -339,8 +330,7 @@ def server_reparse(name: str, amount: float) -> tuple[str, float]:
 class FakeFoodServer:
     """A stateful stand-in for add_food / get_food / get_foods.
 
-    An unknown id fails get_food / get_foods with the real not-found body
-    (see not_found_body), never a silently shorter list.
+    Unknown ids get the real not-found body (not_found_body).
 
     add_food upserts like the real endpoint: new foods and measures get ids,
     the first measure becomes the default (unless it's a lone "g", which

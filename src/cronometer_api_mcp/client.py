@@ -443,13 +443,9 @@ class CronometerClient:
         # session comes back as {"result": "FAIL", "error": "..."}; "FAILURE" is
         # kept defensively (never observed in real traffic, but harmless).
         if isinstance(data, dict) and data.get("result") in ("FAIL", "FAILURE"):
-            # A FAIL carrying "messages" (the account's pending sync messages)
-            # came from a handler that ran for an authenticated user, e.g.
-            # {"result": "FAIL", "messages": [...], "error": "WebServiceV2
-            # doGetFoods(): Food 999 not found"}; a fresh login can't change it.
-            # Every auth FAIL seen live (expired, bogus, null token; wrong
-            # userId) has no "messages", nor do pre-dispatch errors (malformed
-            # payload, "Invalid Command"), so those still re-authenticate.
+            # Only a handler that ran for an authenticated user attaches the
+            # account's sync "messages" (e.g. "Food 999 not found"); no auth
+            # FAIL seen live has them, so re-login can't fix these.
             if "messages" in data:
                 raise CronometerError(f"Cronometer API error: {data['error']}")
             if not _retried:
