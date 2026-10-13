@@ -655,6 +655,7 @@ def test_enrich_recipe_scales_by_the_measure_value_like_the_server(
 
     assert entry["nutrients"][208] == pytest.approx(server_kcal, abs=1e-4)
     assert entry["serving_size"]["grams"] is None
+    assert entry["recipe"] is True
     assert entry["servings"] == grams
 
 
@@ -707,6 +708,17 @@ def test_enrich_weight_entry_without_its_measure_ignores_the_default(
 
     assert "serving_size" not in entry
     assert "servings" not in entry
+    assert entry["nutrients"] == {208: 120.0}
+
+
+@pytest.mark.parametrize("measures", [[], [{"id": 10, "name": "x", "value": 40}]])
+def test_enrich_food_without_recipe_measures_is_per_100g(tmp_path, measures):
+    food = {"id": 100, "name": "Bar", "measures": measures,
+            "nutrients": [{"id": 208, "amount": 400}]}  # fmt: skip
+
+    entry = _enrich_one(tmp_path, food, 10, 30)
+
+    assert entry["recipe"] is False
     assert entry["nutrients"] == {208: 120.0}
 
 

@@ -370,15 +370,18 @@ def test_unknown_food_is_the_servers_not_found_error(client, tmp_path):
     }
 
 
-def test_entry_without_numeric_grams_is_an_error_not_a_bare_entry(client):
+@pytest.mark.parametrize("food_id", [1, 2])
+@pytest.mark.parametrize("grams", [None, "50", float("nan"), float("inf")])
+def test_entry_without_numeric_grams_is_an_error(client, food_id, grams):
+    measure_id = {1: 10, 2: 20}[food_id]
     client.diaries[date(2026, 10, 14)] = _diary(
-        _serving(7, 1, 10, None, 1), _serving(8, 2, 20, 1, 3)
+        _serving(7, food_id, measure_id, grams, 1), _serving(8, 2, 20, 1, 3)
     )
 
     result = _call()
 
     assert result["status"] == "error"
-    assert "food_ids 1;" in result["message"]
+    assert f"Diary entry 7 ({FOODS[food_id]['name']!r}) has grams" in result["message"]
 
 
 def test_unknown_diary_shape_fails(client):

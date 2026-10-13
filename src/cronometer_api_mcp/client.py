@@ -1059,10 +1059,10 @@ class CronometerClient:
 
         This creates a *weight-based* recipe: measures are type "Weight", and
         the nutrients the server derives are stored per-100g.
-        (Cronometer's other mode, "serving-based", uses type "Recipe" measures
-        and stores nutrients per full batch, which makes the diary's `grams`
-        field a serving count instead of real grams -- see
-        enrich_diary_servings. Weight-based avoids that quirk entirely.)
+        (Cronometer's other mode, "serving-based", uses type "Recipe" measures,
+        stores nutrients per reference serving, and makes the diary's `grams`
+        field a count of measure units -- see enrich_diary_servings.
+        Weight-based avoids that quirk entirely.)
 
         Args:
             name: Recipe name.
@@ -1983,6 +1983,7 @@ class CronometerClient:
             portion in the entry's measureId, only while the food still has
             that measure. Recipe measures have null grams (see below).
           - servings: number of those portions consumed, when derivable
+          - recipe: whether the food is a serving-based recipe
           - nutrients: the food's nutrient profile scaled to the entry's
             amount, as {nutrient_id: amount}
 
@@ -1990,7 +1991,8 @@ class CronometerClient:
         foods by grams / 100, whatever the measure; serving-based recipes (all
         measures type Recipe) by grams / the measure's value, with grams a
         count of its units. A recipe entry without its measure raises: the
-        server's divisor then isn't the default measure's.
+        server's divisor then isn't the default measure's. So does an entry
+        whose grams isn't a number.
 
         A get_foods failure raises, including an unknown food id. The diary
         dict is mutated in place and also returned. Non-Serving entries (Exercise,
@@ -2036,6 +2038,12 @@ class CronometerClient:
                     f"and other measure types, so its diary amounts can't be read"
                 )
             grams = entry.get("grams")
+            if not (isinstance(grams, (int, float)) and math.isfinite(grams)):
+                raise CronometerError(
+                    f"Diary entry {entry.get('servingId')} ({food.get('name')!r}) "
+                    f"has grams {grams!r}, not a number"
+                )
+            entry["recipe"] = recipe
             if recipe and not (measure and _is_positive_number(measure.get("value"))):
                 raise CronometerError(
                     f"Diary entry {entry.get('servingId')} ({food.get('name')!r}, "
@@ -2055,19 +2063,16 @@ class CronometerClient:
                     "unit": measure.get("name"),
                     "grams": None if recipe else portion_value,
                 }
-                if isinstance(grams, (int, float)) and _is_positive_number(
-                    portion_value
-                ):
+                if _is_positive_number(portion_value):
                     entry["servings"] = round(
                         grams if recipe else grams / portion_value, 4
                     )
 
-            if isinstance(grams, (int, float)):
-                scale = grams / (measure["value"] if recipe else 100.0)
-                entry["nutrients"] = {
-                    n["id"]: round(n["amount"] * scale, 4)
-                    for n in food.get("nutrients", [])
-                }
+            scale = grams / (measure["value"] if recipe else 100.0)
+            entry["nutrients"] = {
+                n["id"]: round(n["amount"] * scale, 4)
+                for n in food.get("nutrients", [])
+            }
 
         logger.info("Enriched %d diary foods with names/nutrients", len(food_by_id))
         return diary

@@ -233,7 +233,7 @@ def get_food_log(
         even if renamed in the app), or "group N" for any further group
       - food, food_id, measure_id: what add_food_entries takes to re-log it
       - grams: the logged weight; null for a serving-based recipe, whose
-        diary amount is a count of reference servings (quantity holds it)
+        diary amount counts the logged measure's units (quantity holds it)
       - measure and quantity: the amount in the logged measure, e.g.
         3 "large"; both null if the food no longer has that measure, and
         quantity null if the measure has no usable weight
@@ -289,11 +289,8 @@ def _food_log_day(
         picked = {names[nid]: amounts[nid] for nid in nutrient_ids if nid in amounts}
         for name, amount in picked.items():
             totals[name] += amount
-        # Only a serving-based recipe has servings but no portion weight.
         size = entry.get("serving_size")
-        counted = "servings" in entry
-        recipe = counted and size["grams"] is None
-        quantity = size["quantity"] if counted else None
+        quantity = size["quantity"] if "servings" in entry else None
         entries.append(
             {
                 "serving_id": entry["servingId"],
@@ -301,7 +298,7 @@ def _food_log_day(
                 "food": entry["name"],
                 "food_id": entry["foodId"],
                 "measure_id": entry["measureId"],
-                "grams": None if recipe else entry["grams"],
+                "grams": None if entry["recipe"] else entry["grams"],
                 "measure": size["unit"] if size else None,
                 "quantity": None
                 if quantity is None
@@ -342,8 +339,8 @@ def get_nutrient_sources(
     matches get_daily_nutrition. Exercise and biometric entries are ignored,
     and a food with no data for a nutrient adds nothing to it.
 
-    grams is null for a food logged in a serving-based recipe's reference
-    servings, which have no gram weight. Diary groups 1-4 use Cronometer's
+    grams is null for a serving-based recipe, whose diary amounts count
+    measure units, not grams. Diary groups 1-4 use Cronometer's
     default names even if they were renamed in the app; any further group
     shows as "group N".
 
@@ -412,21 +409,9 @@ def _diary_entries(diary: dict) -> list[dict]:
 
 
 def _food_servings(*diaries: dict) -> list[dict]:
-    """The Serving entries of enriched diaries.
-
-    Raises if any lacks nutrient data (enrichment leaves an entry bare when
-    its grams isn't a number), since totals would silently undercount.
-    """
+    """The Serving entries of enriched diaries."""
     entries = [_diary_entries(diary) for diary in diaries]
-    servings = [e for day in entries for e in day if e["type"] == "Serving"]
-    unresolved = sorted({e["foodId"] for e in servings if "nutrients" not in e})
-    if unresolved:
-        raise RuntimeError(
-            "Could not load nutrient data for food_ids "
-            + ", ".join(map(str, unresolved))
-            + "; totals would be incomplete. Try again."
-        )
-    return servings
+    return [e for day in entries for e in day if e["type"] == "Serving"]
 
 
 def _match_nutrients(queries: list[str], defs: dict[int, dict]) -> list[int]:
@@ -483,9 +468,7 @@ def _rank_sources(
             food["amount"] += amount
             food["entries"] += 1
             # Serving-based recipe entries count measure units, not grams.
-            if food["grams"] is not None and (
-                "servings" not in entry or entry["serving_size"]["grams"] is not None
-            ):
+            if food["grams"] is not None and not entry["recipe"]:
                 food["grams"] += entry["grams"]
             else:
                 food["grams"] = None
