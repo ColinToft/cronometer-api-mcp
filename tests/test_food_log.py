@@ -325,9 +325,18 @@ def test_multiple_days_fetch_each_day_once(client):
     assert client.get_foods.call_count == 2
 
 
-def test_failed_enrichment_is_an_error_not_bare_entries(client):
+def test_failed_food_lookup_reports_its_cause(client):
     client.get_foods.side_effect = RuntimeError("boom")
     client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 1, 10, 50, 1))
+
+    assert _call() == {"status": "error", "message": "RuntimeError: boom"}
+
+
+def test_food_missing_from_lookup_is_an_error_not_a_bare_entry(client):
+    client.get_foods.side_effect = lambda ids: [FOODS[i] for i in ids if i != 1]
+    client.diaries[date(2026, 10, 14)] = _diary(
+        _serving(7, 1, 10, 50, 1), _serving(8, 2, 20, 1, 3)
+    )
 
     result = _call()
 

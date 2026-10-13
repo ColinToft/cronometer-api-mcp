@@ -398,15 +398,13 @@ def test_unknown_diary_group_is_labelled_by_number(client):
     assert sodium["by_diary_group"] == {"group 5": {"amount": 500, "percent": 100.0}}
 
 
-def test_failed_enrichment_is_an_error_not_an_undercount(client):
+def test_failed_food_lookup_reports_its_cause(client):
     client.get_foods.side_effect = RuntimeError("boom")
     client.diaries[date(2026, 10, 14)] = _diary(_serving(1, 100, 1), _serving(2, 10, 1))
 
     result = _call(nutrients="sodium")
 
-    assert result["status"] == "error"
-    assert "food_ids 1, 2" in result["message"]
-    assert "incomplete" in result["message"]
+    assert result == {"status": "error", "message": "RuntimeError: boom"}
 
 
 def test_food_missing_from_lookup_is_an_error(client):

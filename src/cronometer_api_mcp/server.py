@@ -238,7 +238,8 @@ def get_food_log(
         date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
               Defaults to today in the account timezone, resolved at call time.
               Prefer relative inputs over dates computed from the conversation.
-        days: Number of calendar days, 1–31 (default 1). Includes the end date.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date;
+              days=3 includes today, date='yesterday', days=3 excludes today.
         nutrients: Nutrient names to report instead of the default Energy,
             Protein, Fat, Saturated, Carbs, Fiber, Sodium, Calcium. Matched
             as in get_nutrient_sources, e.g. ["Energy", "Iron", "B12"].
@@ -272,7 +273,7 @@ def _food_log_day(
     totals = dict.fromkeys(names.values(), 0.0)
     entries = []
     for entry in _food_servings(data):
-        amounts = {n["id"]: n["amount"] for n in entry["nutrients"]}
+        amounts = entry["nutrients"]
         picked = {names[nid]: amounts[nid] for nid in nutrient_ids if nid in amounts}
         for name, amount in picked.items():
             totals[name] += amount
@@ -405,9 +406,8 @@ def _diary_entries(diary: dict) -> list[dict]:
 def _food_servings(*diaries: dict) -> list[dict]:
     """The Serving entries of enriched diaries.
 
-    Raises if any lacks nutrient data (enrichment is best-effort and leaves an
-    entry bare when its food can't be fetched), since totals would silently
-    undercount.
+    Raises if any lacks nutrient data (enrichment leaves an entry bare when
+    get_foods doesn't return its food), since totals would silently undercount.
     """
     entries = [_diary_entries(diary) for diary in diaries]
     servings = [e for day in entries for e in day if e["type"] == "Serving"]
@@ -461,9 +461,7 @@ def _rank_sources(
         foods: dict[int, dict] = {}
         groups: dict[int, float] = {}
         for entry in servings:
-            amount = next(
-                (n["amount"] for n in entry["nutrients"] if n["id"] == nid), 0.0
-            )
+            amount = entry["nutrients"].get(nid, 0.0)
             food = foods.setdefault(
                 entry["foodId"],
                 {

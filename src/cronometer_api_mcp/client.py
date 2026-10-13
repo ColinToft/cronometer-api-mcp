@@ -1978,27 +1978,26 @@ class CronometerClient:
         return {"macros": macros, "nutrients": nutrients}
 
     def enrich_diary_servings(self, diary: dict) -> dict:
-        """Merge food metadata into a raw get_diary payload (best-effort).
+        """Merge food metadata into a raw get_diary payload.
 
         Diary "Serving" entries carry only numeric IDs (foodId, measureId,
         grams). This resolves each foodId via a single batch get_foods call and
         merges per-entry:
 
-          - name, source, category: from the food object
+          - name: from the food object
           - serving_size: {measure_id, quantity, unit, grams} defining one
             portion in the entry's measureId (falls back to defaultMeasureId).
             Recipe measures have null grams: their value is a reference-serving
             count, not a gram weight.
           - servings: number of those portions consumed, when derivable
-          - nutrients: the food's nutrient profile scaled to the entry's amount
-            (per-100g for Weight/Atomic measures, per-serving for Recipe
-            measures), labeled with name/unit/category via the nutrient
-            definitions catalog
+          - nutrients: {nutrient_id: amount}, the food's profile scaled to the
+            entry's amount (per-100g for Weight/Atomic measures, per-serving
+            for Recipe measures)
 
-        Enrichment is best-effort: if the get_foods call fails or a food is not
-        returned, the corresponding entries are left unchanged. The diary dict
-        is mutated in place and also returned. Non-Serving entries (Exercise,
-        Biometric) already carry a name and are left untouched.
+        A get_foods failure raises. A food that get_foods doesn't return leaves
+        its entries without name/nutrients, for the caller to reject. The diary
+        dict is mutated in place and also returned. Non-Serving entries
+        (Exercise, Biometric) already carry a name and are left untouched.
         """
         if not isinstance(diary, dict):
             return diary
@@ -2018,17 +2017,8 @@ class CronometerClient:
         if not food_ids:
             return diary
 
-        try:
-            foods = self.get_foods(food_ids)
-        except Exception as exc:  # best-effort: keep diary without names
-            logger.warning("Diary enrichment skipped (get_foods failed): %s", exc)
-            return diary
-
+        foods = self.get_foods(food_ids)
         food_by_id = {f.get("id"): f for f in foods if isinstance(f, dict)}
-        try:
-            defs = self.get_nutrient_definitions()
-        except Exception:
-            defs = {}
 
         for entry in entries:
             if not isinstance(entry, dict) or entry.get("type") != "Serving":
@@ -2038,9 +2028,6 @@ class CronometerClient:
                 continue
 
             entry["name"] = food.get("name")
-            entry["source"] = food.get("source")
-            if food.get("category") is not None:
-                entry["category"] = food.get("category")
 
             measures = {
                 m.get("id"): m for m in food.get("measures", []) if isinstance(m, dict)
@@ -2078,25 +2065,10 @@ class CronometerClient:
                     scale = grams
                 else:
                     scale = grams / 100.0
-                scaled: list[dict] = []
-                for n in food.get("nutrients", []):
-                    if not isinstance(n, dict):
-                        continue
-                    nid = n.get("id")
-                    amount = n.get("amount")
-                    if nid is None or not isinstance(amount, (int, float)):
-                        continue
-                    meta = defs.get(nid, {})
-                    scaled.append(
-                        {
-                            "id": nid,
-                            "name": meta.get("name"),
-                            "amount": round(amount * scale, 4),
-                            "unit": meta.get("unit"),
-                            "category": meta.get("category"),
-                        }
-                    )
-                entry["nutrients"] = scaled
+                entry["nutrients"] = {
+                    n["id"]: round(n["amount"] * scale, 4)
+                    for n in food.get("nutrients", [])
+                }
 
         logger.info("Enriched %d diary foods with names/nutrients", len(food_by_id))
         return diary

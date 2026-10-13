@@ -228,7 +228,6 @@ def test_update_custom_food_serving_size_in_diary(
 
     saved = state["payloads"][1]["data"]
     monkeypatch.setattr(client, "get_foods", lambda ids: [saved])
-    monkeypatch.setattr(client, "get_nutrient_definitions", dict)
     diary = client.enrich_diary_servings(
         {
             "diary": [
@@ -253,8 +252,7 @@ def test_update_custom_food_serving_size_in_diary(
         assert entry["servings"] == count
         assert "measure" not in entry
         assert "quantity" not in entry
-        energy = next(n for n in entry["nutrients"] if n["id"] == 208)
-        assert energy["amount"] == calories
+        assert entry["nutrients"][208] == calories
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"serving_quantity": 2}])
