@@ -955,10 +955,9 @@ class CronometerClient:
             per_serving.update(extra_nutrients or {})
 
             serving_args = (serving_name, serving_grams, serving_quantity)
-            measure = self._default_measure(food)
-            if measure is None and (
-                per_serving or any(v is not None for v in serving_args)
-            ):
+            edits_serving = per_serving or any(v is not None for v in serving_args)
+            measure = self._default_measure(food) if edits_serving else None
+            if edits_serving and measure is None:
                 raise CronometerError(
                     f"Custom food {food_id} has no serving measure, so its "
                     f"serving and per-serving nutrients can't be set; fix it in "

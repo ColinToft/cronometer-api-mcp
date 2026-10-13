@@ -1409,16 +1409,38 @@ def test_update_custom_food_with_zero_default_measure(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("kwargs", [{"name": "Renamed"}, {"calories": 3}])
+_CUP = {"id": 9001, "name": "cup", "value": 240, "amount": 1, "type": "Atomic"}
+
+
+@pytest.mark.parametrize("kwargs", [{"calories": 3}, {"serving_grams": 2}])
 def test_update_custom_food_zero_default_with_two_measures_raises(tmp_path, kwargs):
     client, state, fake, _ = _create_gram_food(tmp_path)
-    fake.foods[4242]["measures"].append(
-        {"id": 9001, "name": "cup", "value": 240, "amount": 1, "type": "Atomic"}
-    )
+    fake.foods[4242]["measures"].append(dict(_CUP))
 
     with pytest.raises(CronometerError, match=r"has 2 measures \['g', 'cup'\]"):
         client.update_custom_food(4242, **kwargs)
     assert state["endpoints"] == ["add_food", "get_food", "get_food"]
+
+
+def test_update_custom_food_zero_default_with_two_measures_still_renames(tmp_path):
+    """A rename never touches a measure, so an ambiguous default doesn't matter."""
+    client, state, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"].append(dict(_CUP))
+
+    client.update_custom_food(4242, name="Renamed")
+
+    assert state["endpoints"] == ["add_food", "get_food", "get_food", "add_food"]
+    assert fake.foods[4242]["name"] == "Renamed"
+
+
+def test_update_custom_food_zero_default_with_lone_non_gram_measure(tmp_path):
+    client, state, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"] = [dict(_CUP)]
+
+    client.update_custom_food(4242, calories=120)
+
+    assert state["endpoints"] == ["add_food", "get_food", "get_food", "add_food"]
+    assert {n["id"]: n["amount"] for n in fake.foods[4242]["nutrients"]}[208] == 50.0
 
 
 def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
