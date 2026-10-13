@@ -309,7 +309,7 @@ def test_user_id_property_triggers_login(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Diary enrichment (get_food_log food names / per-entry nutrients)
+# Diary enrichment (food names / per-entry nutrients)
 # ---------------------------------------------------------------------------
 
 
@@ -380,16 +380,10 @@ SAMPLE_FOODS = [
     },
 ]
 
-NUTRIENT_DEFS = {
-    208: {"name": "Energy", "unit": "kcal", "category": "General"},
-    203: {"name": "Protein", "unit": "g", "category": "Protein"},
-}
-
 
 def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
     client = _enrich_client(tmp_path)
     client.get_foods = lambda ids: SAMPLE_FOODS  # type: ignore[method-assign]
-    client.get_nutrient_definitions = lambda: NUTRIENT_DEFS  # type: ignore[method-assign]
 
     out = client.enrich_diary_servings(
         {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
@@ -398,8 +392,7 @@ def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
 
     oats = entries[0]
     assert oats["name"] == "Oats"
-    assert oats["source"] == "USDA"
-    assert oats["category"] == "Grains"
+    assert "source" not in oats and "category" not in oats
     assert oats["serving_size"] == {
         "measure_id": 10,
         "quantity": 1,
@@ -408,17 +401,14 @@ def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
     }
     assert oats["servings"] == 2.0  # 200g / 100g per cup
     # per-100g energy 389 scaled to 200g -> 778
-    energy = next(n for n in oats["nutrients"] if n["id"] == 208)
-    assert energy["amount"] == 778.0
-    assert energy["name"] == "Energy"
-    assert energy["unit"] == "kcal"
+    assert oats["nutrients"] == {208: 778.0, 203: 33.8}
 
     milk = entries[1]
     # unknown measureId 999 -> fell back to defaultMeasureId 20
     assert milk["serving_size"]["measure_id"] == 20
     assert milk["serving_size"]["unit"] == "glass"
     # 42 kcal/100g scaled to 50g -> 21
-    assert next(n for n in milk["nutrients"] if n["id"] == 208)["amount"] == 21.0
+    assert milk["nutrients"] == {208: 21.0}
 
     recipe = entries[2]
     assert recipe["name"] == "Recipe Food"
@@ -431,10 +421,7 @@ def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
     assert recipe["servings"] == 1.1
     # Recipe measure: nutrients are per-serving and "grams" is a serving count,
     # so 708.538 kcal/serving * 1.1 servings -> 779.39 (not grams/100)
-    energy = next(n for n in recipe["nutrients"] if n["id"] == 208)
-    assert energy["amount"] == 779.3918
-    protein = next(n for n in recipe["nutrients"] if n["id"] == 203)
-    assert protein["amount"] == 61.633
+    assert recipe["nutrients"] == {208: 779.3918, 203: 61.633}
 
     # Non-Serving entry untouched
     assert entries[3] == {"type": "Exercise", "name": "Running", "order": 1}
@@ -465,7 +452,6 @@ def test_enrich_diary_measure_quantity(
         ],
     }
     monkeypatch.setattr(client, "get_foods", lambda ids: [food])
-    monkeypatch.setattr(client, "get_nutrient_definitions", dict)
 
     out = client.enrich_diary_servings(
         {"diary": [{"type": "Serving", "foodId": 100, "measureId": 999, "grams": 60}]}
@@ -477,7 +463,7 @@ def test_enrich_diary_measure_quantity(
     assert entry["servings"] == servings
 
 
-def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):
+def test_enrich_diary_raises_when_get_foods_fails(tmp_path):
     client = _enrich_client(tmp_path)
 
     def boom(ids):
@@ -485,13 +471,22 @@ def test_enrich_diary_is_best_effort_when_get_foods_fails(tmp_path):
 
     client.get_foods = boom  # type: ignore[method-assign]
 
-    original = {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+    with pytest.raises(CronometerError, match="network down"):
+        client.enrich_diary_servings(
+            {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
+        )
+
+
+def test_enrich_diary_leaves_foods_get_foods_omits_bare(tmp_path):
+    client = _enrich_client(tmp_path)
+    client.get_foods = lambda ids: SAMPLE_FOODS[1:]  # type: ignore[method-assign]
+
     out = client.enrich_diary_servings(
         {"diary": [dict(e) for e in SAMPLE_DIARY["diary"]]}
     )
 
-    # Entries returned unchanged (no name/nutrients added).
-    assert out["diary"] == original["diary"]
+    assert out["diary"][0] == SAMPLE_DIARY["diary"][0]
+    assert out["diary"][1]["nutrients"] == {208: 21.0}
 
 
 # ---------------------------------------------------------------------------

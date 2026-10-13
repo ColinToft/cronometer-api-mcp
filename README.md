@@ -118,10 +118,9 @@ cached session, so it also overrides a stale cached timezone.
 
 | Tool | Description |
 |------|-------------|
-| `get_food_log` | Diary entries for a date, each enriched with food name, source, serving measure/count, and that food's per-entry nutrient contribution, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient |
-| `get_food_log_compact` | The same entries in about 2% of the size, for reviewing or editing a day: per entry its serving ID, meal, food and food ID, measure ID, grams, measure name and quantity, and a few key nutrients (or ones you name), plus the day's totals and energy_summary |
+| `get_food_log` | Diary entries for reviewing or editing a day: per entry its serving ID, meal, food and food ID, measure ID, grams, measure name and quantity, and a few key nutrients (or ones you name); per day the totals of those nutrients, whether the day is marked complete, an energy_summary (target/consumed/remaining kcal), and non-food entries (exercise, biometrics). For every tracked nutrient's total use `get_daily_nutrition`; for a food's full profile, `get_food_details` |
 | `get_daily_nutrition` | Consumed macro and micronutrient totals for every nutrient tracked in Cronometer |
-| `get_nutrient_sources` | Top foods behind one or more nutrient totals (e.g. "where did my sodium come from?"): total, split by diary group, and ranked sources with grams eaten, amount, and percent, aggregated across entries and days. A compact alternative to scanning `get_food_log` |
+| `get_nutrient_sources` | Top foods behind one or more nutrient totals (e.g. "where did my sodium come from?"): total, split by diary group, and ranked sources with grams eaten, amount, and percent, aggregated across entries and days. Covers any nutrient, not only the few `get_food_log` reports per entry |
 | `get_nutrition_scores` | Category scores (Vitamins, Minerals, etc.) with per-nutrient consumed amounts and confidence levels |
 
 ### Food Search & Details
@@ -162,12 +161,12 @@ All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
 ### Relative dates and recent days
 
-`get_food_log`, `get_food_log_compact`, `get_daily_nutrition`, `get_nutrient_sources`, and `get_nutrition_scores` also accept
+`get_food_log`, `get_daily_nutrition`, `get_nutrient_sources`, and `get_nutrition_scores` also accept
 `"today"`, `"yesterday"`, and `"N days ago"` as their `date`. These are resolved
 at call time using your Cronometer account timezone, so Claude can pass relative
 inputs without relying on dates from earlier in a long conversation.
 
-`get_food_log`, `get_food_log_compact`, `get_daily_nutrition`, and `get_nutrient_sources` accept `days` (1–31, default 1), counting
+`get_food_log`, `get_daily_nutrition`, and `get_nutrient_sources` accept `days` (1–31, default 1), counting
 back from the inclusive end `date`:
 
 ```python

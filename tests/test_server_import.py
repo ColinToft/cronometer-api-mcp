@@ -24,7 +24,6 @@ EXPECTED_TOOLS = {
     "get_fasting_stats",
     "get_food_details",
     "get_food_log",
-    "get_food_log_compact",
     "get_macro_targets",
     "get_nutrient_sources",
     "get_nutrition_scores",
