@@ -89,7 +89,6 @@ _RECIPE_FIXED_MEASURES = _WEIGHT_UNIT_MEASURES | {_FULL_RECIPE_MEASURE}
 # The web client saves a serving with a gram weight as "Weight"; "Atomic" is a
 # count unit (a supplement "tablet"). See _check_recipe_ingredient.
 _WEIGHED_MEASURE = "Weight"
-_ATOMIC_MEASURE = "Atomic"
 # Recipe serving weights are sent rounded to this many decimals, and read back
 # within _GRAMS_TOL: a batch that doesn't divide evenly (4561 g / 6) would
 # otherwise send an unbounded float.
@@ -684,7 +683,7 @@ class CronometerClient:
         refused. The saved serving is read back and re-sent once if the server
         re-parsed its name (see _settle_serving). The serving is type
         "Weight", so the food can be a recipe ingredient; the server then adds
-        a "g" measure (update_custom_food needs the returned measure_id).
+        a "g" measure.
 
         Args:
             extra_nutrients: Additional nutrients beyond the core macros above
@@ -778,7 +777,7 @@ class CronometerClient:
                 food = self.get_food(food_id)
                 _, serving = self._settle_serving(
                     food,
-                    _created_serving(food, serving_name)["id"],
+                    _custom_food_serving(food, None)["id"],
                     serving_name,
                     serving_quantity,
                     serving_grams,
@@ -904,9 +903,7 @@ class CronometerClient:
         Otherwise a food first saved as "400 g" keeps amount=400 and shows up
         as "400 <serving_name>" with no weight of its own.
 
-        Every save re-types weighed "Atomic" measures (older versions created
-        them) as "Weight" so the food can be a recipe ingredient; diary math
-        is unchanged. serving_name must
+        serving_name must
         not lead with a quantity ("2 cookies"); pass it as serving_quantity.
         A quantity set without serving_grams keeps the total weight,
         so the per-unit weight changes. (update_recipe keeps the quantity on a
@@ -981,9 +978,6 @@ class CronometerClient:
                 measure["amount"] = (
                     serving_quantity if serving_quantity is not None else 1.0
                 )
-            for m in food["measures"]:
-                if m["type"] == _ATOMIC_MEASURE and _is_positive_number(m["value"]):
-                    m["type"] = _WEIGHED_MEASURE
             updates = {}
             if per_serving:
                 grams = measure["value"]
@@ -2410,22 +2404,10 @@ def _serving_fraction(batch_grams: float, servings_per_batch: float) -> float:
     return round(batch_grams / servings_per_batch, _GRAMS_DECIMALS)
 
 
-def _created_serving(food: dict, serving_name: str) -> dict:
-    """The new food's serving: the server adds a "g" beside it (seen live)."""
-    gram = _measure_key(serving_name) == "g"
-    found = [m for m in food["measures"] if gram or _measure_key(m["name"]) != "g"]
-    if len(found) != 1:
-        raise CronometerError(
-            f"Custom food {food['id']} read back with measures "
-            f"{[(m['id'], m['name'], m['value']) for m in food['measures']]}; "
-            f"expected its serving {serving_name!r} and at most Cronometer's g"
-        )
-    return found[0]
-
-
 def _custom_food_serving(food: dict, measure_id: int | None) -> dict:
-    """measure_id's measure, else the sole one. Not defaultMeasureId: the
-    server moves it to the last-logged measure (seen live)."""
+    """measure_id's measure, else the sole one besides g/oz (the server adds a
+    g beside a new food's serving). Not defaultMeasureId: the server moves it
+    to the last-logged measure (seen live)."""
     measures = food.get("measures") or []
     label = f"Custom food {food['id']}"
     if not measures:
@@ -2435,6 +2417,9 @@ def _custom_food_serving(food: dict, measure_id: int | None) -> dict:
         )
     listed = [(m["id"], m["name"], m["value"]) for m in measures]
     if measure_id is None:
+        servings = [m for m in measures if not _is_weight_unit(m["name"])]
+        if len(servings) == 1:
+            return servings[0]
         if len(measures) > 1:
             raise CronometerError(
                 f"{label} has {len(measures)} measures (id, name, grams) "
@@ -2480,22 +2465,11 @@ def _check_recipe_ingredient(food: dict) -> None:
     others = [m for m in food["measures"] if m["type"] != _WEIGHED_MEASURE]
     if not others:
         return
-    if food.get("source") == "Custom" and all(
-        m["type"] == _ATOMIC_MEASURE and _is_positive_number(m["value"]) for m in others
-    ):
-        fix = (
-            "It's a custom food whose servings an older version of this tool "
-            "saved as 'Atomic'; any update_custom_food edit (e.g. passing its "
-            "current name) re-saves them as 'Weight', which fixes this"
-        )
-    else:
-        fix = "Use a food whose servings all have a gram weight"
     raise CronometerError(
         f"Food {food['id']} ({food['name']!r}) can't be a recipe ingredient: "
         f"its measures {[(m['name'], m['type']) for m in others]} aren't type "
         f"'Weight', and Cronometer leaves such a food's grams out of a "
-        f"recipe's batch weight, which would inflate its per-100 g nutrients. "
-        f"{fix}"
+        f"recipe's batch weight, which would inflate its per-100 g nutrients"
     )
 
 

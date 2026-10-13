@@ -1067,8 +1067,7 @@ def add_custom_food(
     Nutrient amounts should be for the full serving size specified.
     After creation, use the returned food_id with add_food_entry to log it.
     Cronometer also gives the food a "g" measure, so it can be logged in
-    grams; pass the returned measure_id to update_custom_food's per-serving
-    edits. The food can be a recipe ingredient (add_recipe).
+    grams. The food can be a recipe ingredient (add_recipe).
 
     Args:
         name: Food name.
@@ -1277,8 +1276,8 @@ def add_recipe(
     The batch weight and nutrients Cronometer derives are checked after
     saving, and a mismatch raises. Ingredients Cronometer can't weigh (a food
     with a non-"Weight" measure, e.g. a supplement "tablet") are refused
-    before saving. A custom food saved by an older version of this tool is
-    one of those until any update_custom_food edit re-saves it.
+    before saving, including custom foods made before Oct 13, 2026
+    ("Atomic" servings).
 
     Args:
         name: Recipe name.

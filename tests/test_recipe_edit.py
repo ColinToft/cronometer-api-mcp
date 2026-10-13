@@ -8,7 +8,6 @@ from __future__ import annotations
 import copy
 import json
 import math
-import re
 
 import httpx
 import pytest
@@ -1833,7 +1832,6 @@ UNWEIGHABLE = {
         _m(7, "serving", 100, "Weight"), _m(8, "g", 1, "Atomic")
     ),
 }
-RETYPE_FIX = "any update_custom_food edit (e.g. passing its current name)"
 
 
 @pytest.mark.parametrize("food", UNWEIGHABLE.values(), ids=UNWEIGHABLE.keys())
@@ -1849,7 +1847,6 @@ def test_create_recipe_refuses_unweighable_ingredient_before_saving(tmp_path, fo
         f"Food {LEGACY_ID} ('ZZ custom') can't be a recipe ingredient: its measures"
     )
     assert "leaves such a food's grams out of a recipe's batch weight" in msg
-    assert RETYPE_FIX in msg
     assert state["endpoints"] == ["get_foods"]  # nothing created
     assert srv.foods == {}
 
@@ -1864,16 +1861,14 @@ def test_create_recipe_refuses_unweighable_ingredient_before_saving(tmp_path, fo
     ],
     ids=["database tablet", "weightless", "partly weightless", "serving-based"],
 )
-def test_unfixable_ingredients_suggest_another_food(tmp_path, food):
+def test_other_unweighable_ingredients_are_refused(tmp_path, food):
     srv = FakeFoodServer(ingredient_foods=[food])
     client, _ = make_server_client(tmp_path, srv)
 
     with pytest.raises(CronometerError) as err:
         client.create_recipe("R", ingredients=[(LEGACY_ID, 80)])
 
-    msg = str(err.value)
-    assert msg.endswith("Use a food whose servings all have a gram weight")
-    assert RETYPE_FIX not in msg
+    assert "can't be a recipe ingredient" in str(err.value)
 
 
 def test_update_recipe_refuses_unweighable_new_ingredient(tmp_path):
@@ -1901,25 +1896,6 @@ def test_update_recipe_refuses_unweighable_kept_ingredient(tmp_path, kwargs):
         client.update_recipe(RECIPE_ID, **kwargs)
 
     assert "add_food" not in endpoints(state)
-
-
-def test_retyped_custom_food_works_as_an_ingredient(tmp_path):
-    legacy = legacy_custom_food()
-    srv = FakeFoodServer(foods=[legacy], ingredient_foods=[legacy])
-    client, _ = make_server_client(tmp_path, srv)
-    with pytest.raises(CronometerError, match=re.escape(RETYPE_FIX)):
-        client.create_recipe("R", ingredients=[(LEGACY_ID, 80)])
-
-    client.update_custom_food(LEGACY_ID, name="ZZ custom")
-    srv.ingredient_foods[LEGACY_ID] = srv.foods[LEGACY_ID]
-    result = client.create_recipe("R", ingredients=[(LEGACY_ID, 80)])
-
-    stored = srv.foods[result["food_id"]]
-    full = next(m for m in stored["measures"] if m["name"] == "full recipe")
-    assert full["value"] == 80
-    energy = {n["id"]: n["amount"] for n in stored["nutrients"]}[208]
-    assert energy == pytest.approx(400.0)
-    assert result["total_grams"] == 80
 
 
 def test_repeated_ingredient_food_is_fetched_and_counted(tmp_path):

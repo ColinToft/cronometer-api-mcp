@@ -1609,18 +1609,10 @@ def test_create_custom_food_failure_after_save_names_the_id(
 @pytest.mark.parametrize(
     ("break_read_back", "match"),
     [
-        (lambda food: food.update(measures=[]), r"read back with measures \[\];"),
+        (lambda food: food.update(measures=[]), "has no serving measure"),
         (
             lambda food: food["measures"].append({**food["measures"][0], "id": 1}),
-            (
-                r"read back with measures \[\(9000, 'serving', 100.0\), "
-                r"\(9001, 'g', 1\), \(1, 'serving', 100.0\)\]; expected its "
-                r"serving 'serving' and at most Cronometer's g"
-            ),
-        ),
-        (
-            lambda food: food["measures"].pop(0),
-            r"read back with measures \[\(9001, 'g', 1\)\]",
+            r"has 3 measures \(id, name, grams\) \[\(9000, 'serving', 100",
         ),
     ],
 )
@@ -1700,11 +1692,12 @@ _CUP = {"id": 9001, "name": "cup", "value": 240, "amount": 1, "type": "Atomic"}
 @pytest.mark.parametrize("kwargs", [{"calories": 3}, {"serving_grams": 2}])
 def test_update_custom_food_two_measures_need_measure_id(tmp_path, kwargs):
     client, state, fake, _ = _create_gram_food(tmp_path)
-    fake.foods[4242]["measures"].append(dict(_CUP))
+    fake.foods[4242]["measures"] += [dict(_CUP), {**_CUP, "id": 9002, "name": "bowl"}]
 
     with pytest.raises(
         CronometerError,
-        match=r"has 2 measures .*\(9000, 'g', 1\), \(9001, 'cup', 240\)\]; pass measure_id",
+        match=r"has 3 measures .*\(9000, 'g', 1\), \(9001, 'cup', 240\), "
+        r"\(9002, 'bowl', 240\)\]; pass measure_id",
     ):
         client.update_custom_food(4242, **kwargs)
     assert state["endpoints"] == ["add_food", "get_food", "get_food"]
@@ -1756,7 +1749,7 @@ def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
 
 def test_update_custom_food_tool_passes_measure_id(tmp_path, monkeypatch):
     client, _, fake, _ = _create_gram_food(tmp_path)
-    fake.foods[4242]["measures"].append(dict(_CUP))
+    fake.foods[4242]["measures"] += [dict(_CUP), {**_CUP, "id": 9002, "name": "bowl"}]
     monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
 
     refused = json.loads(mcp_server.update_custom_food(4242, calories=120))
@@ -1766,3 +1759,18 @@ def test_update_custom_food_tool_passes_measure_id(tmp_path, monkeypatch):
     out = json.loads(mcp_server.update_custom_food(4242, calories=120, measure_id=9001))
     assert out["status"] == "success"
     assert {n["id"]: n["amount"] for n in fake.foods[4242]["nutrients"]}[208] == 50.0
+
+
+def test_created_custom_food_takes_per_serving_edits_without_measure_id(tmp_path):
+    fake = FakeFoodServer()
+    client, _ = make_server_client(tmp_path, fake)
+    created = _create(client, serving_name="bar", serving_grams=40)
+
+    client.update_custom_food(4242, calories=120)
+
+    food = fake.foods[4242]
+    assert [(m["id"], m["name"]) for m in food["measures"]] == [
+        (created["measure_id"], "bar"),
+        (9001, "g"),
+    ]
+    assert {n["id"]: n["amount"] for n in food["nutrients"]}[208] == 300.0

@@ -597,12 +597,14 @@ SERVING_EDITS = [
 def test_update_custom_food_with_several_measures_requires_measure_id(
     tmp_path, default, kwargs
 ):
-    client, state = make_cold_client(tmp_path, [two_measure_food(default)])
+    food = two_measure_food(default)
+    food["measures"].append(_measure(902, "bowl", 300))
+    client, state = make_cold_client(tmp_path, [food])
 
     with pytest.raises(
         CronometerError,
-        match=r"has 2 measures \(id, name, grams\) \[\(900, 'serving', 50\), "
-        r"\(901, 'g', 1\)\]; pass measure_id",
+        match=r"has 3 measures \(id, name, grams\) \[\(900, 'serving', 50\), "
+        r"\(901, 'g', 1\), \(902, 'bowl', 300\)\]; pass measure_id",
     ):
         client.update_custom_food(FOOD_ID, **kwargs)
     assert len(state["payloads"]) == 1  # the read, no save
@@ -685,59 +687,60 @@ def test_update_custom_food_refuses_renaming_serving_to_weight_unit(tmp_path, un
     assert state["payloads"] == []
 
 
-def _measure(mid: int, name: str, value, mtype: str, amount: float = 1) -> dict:
-    return {"id": mid, "name": name, "amount": amount, "value": value, "type": mtype}
+def _measure(mid: int, name: str, value, mtype: str = "Weight") -> dict:
+    return {"id": mid, "name": name, "amount": 1, "value": value, "type": mtype}
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("measures", "picked"),
     [
-        {"name": "Test Food"},
-        {"name": "Renamed"},
-        {"calories": 120},
-        {"serving_quantity": 2},
-        {"serving_grams": 40},
+        ([_measure(900, "bar", 40), _measure(901, "g", 1)], 900),
+        ([_measure(901, "g", 1), _measure(900, "bar", 40)], 900),
+        (
+            [
+                _measure(901, "g", 1),
+                _measure(902, "oz", 28.35),
+                _measure(900, "cup", 240),
+            ],
+            900,
+        ),
+        ([_measure(901, " G ", 1)], 901),
     ],
 )
-def test_any_edit_retypes_weighed_atomic_measures(tmp_path, kwargs):
+def test_serving_is_the_one_measure_besides_g_and_oz(tmp_path, measures, picked):
+    food = custom_food()
+    food["measures"] = measures
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, calories=100)
+
+    by_id = {m["id"]: m for m in measures}
+    grams = by_id[picked]["value"]
+    assert nutrients_by_id(state["payloads"][1])[208] == round(100 * 100 / grams, 2)
+
+
+@pytest.mark.parametrize(
+    "measures",
+    [
+        [_measure(901, "g", 1), _measure(902, "oz", 28.35)],
+        [_measure(900, "bar", 40), _measure(903, "cup", 240), _measure(901, "g", 1)],
+    ],
+)
+def test_serving_still_ambiguous_without_exactly_one_other(tmp_path, measures):
+    food = custom_food()
+    food["measures"] = measures
+    client, state = make_cold_client(tmp_path, [food])
+
+    with pytest.raises(CronometerError, match="pass measure_id"):
+        client.update_custom_food(FOOD_ID, calories=100)
+    assert len(state["payloads"]) == 1
+
+
+def test_update_leaves_measure_types_alone(tmp_path):
     food = custom_food()
     client, state = make_cold_client(tmp_path, [food, OK])
 
-    client.update_custom_food(FOOD_ID, **kwargs)
+    client.update_custom_food(FOOD_ID, name="Renamed")
 
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert measure["type"] == "Weight"
-    assert measure["id"] == 900
-
-
-def test_retyping_covers_every_measure_and_keeps_the_rest(tmp_path):
-    food = custom_food()
-    food["measures"] = [
-        _measure(900, "serving", 50, "Atomic"),
-        _measure(901, "cookies", 30, "Atomic", amount=2),
-        _measure(902, "g", 1, "Atomic"),
-        _measure(903, "cup", 240, "Weight"),
-    ]
-    client, state = make_cold_client(tmp_path, [food, OK])
-
-    client.update_custom_food(FOOD_ID, name="Renamed")
-
-    sent = state["payloads"][1]["data"]["measures"]
-    assert [(m["id"], m["amount"], m["value"], m["type"]) for m in sent] == [
-        (900, 1, 50, "Weight"),
-        (901, 2, 30, "Weight"),
-        (902, 1, 1, "Weight"),
-        (903, 1, 240, "Weight"),
-    ]
-
-
-@pytest.mark.parametrize("value", [0, None, -5, float("nan")])
-def test_weightless_atomic_measures_stay_atomic(tmp_path, value):
-    food = custom_food()
-    food["measures"].append(_measure(901, "tablet", value, "Atomic"))
-    client, state = make_cold_client(tmp_path, [food, OK])
-
-    client.update_custom_food(FOOD_ID, name="Renamed")
-
-    sent = state["payloads"][1]["data"]["measures"]
-    assert [(m["id"], m["type"]) for m in sent] == [(900, "Weight"), (901, "Atomic")]
+    assert measure["type"] == "Atomic"
