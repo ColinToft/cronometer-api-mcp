@@ -378,8 +378,6 @@ def test_serving_based_recipe_scales_per_serving_and_has_no_grams(client):
 
 
 def test_recipe_grams_stay_null_when_logged_by_its_g_measure(client):
-    # A serving-based recipe's "g" is a Recipe measure too, valued at the
-    # grams in one reference serving (seen live).
     weighed = _food(5, "Stew", {SODIUM: 900}, measure_type="Recipe", value=1)
     weighed["measures"].append({"id": 51, "name": "g", "value": 250, "type": "Recipe"})
     foods_with_grams = {**FOODS, 5: weighed}

@@ -289,9 +289,7 @@ def _food_log_day(
         picked = {names[nid]: amounts[nid] for nid in nutrient_ids if nid in amounts}
         for name, amount in picked.items():
             totals[name] += amount
-        # enrich_diary_servings sets serving_size only while the food still has
-        # the logged measure, servings only when that measure has a value, and
-        # gives a serving-based recipe's measure null grams.
+        # Only a serving-based recipe has servings but no portion weight.
         size = entry.get("serving_size")
         counted = "servings" in entry
         recipe = counted and size["grams"] is None
@@ -484,8 +482,7 @@ def _rank_sources(
             )
             food["amount"] += amount
             food["entries"] += 1
-            # Serving-based recipe entries count measure units, not grams; only
-            # they have servings without a portion weight.
+            # Serving-based recipe entries count measure units, not grams.
             if food["grams"] is not None and (
                 "servings" not in entry or entry["serving_size"]["grams"] is not None
             ):

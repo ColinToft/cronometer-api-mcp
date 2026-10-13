@@ -1986,20 +1986,11 @@ class CronometerClient:
           - nutrients: the food's nutrient profile scaled to the entry's
             amount, as {nutrient_id: amount}
 
-        How "grams" reads depends on the food (all verified live against the
-        server's own day totals):
-          - Weight/Atomic measures: real grams. Nutrients are per 100 g, so
-            they scale by grams / 100 whatever the measure, even one the food
-            no longer has (measureId 0, or a deleted measure the server left
-            the entry on).
-          - Recipe measures (serving-based recipes made in the app): "grams" is
-            a count of the measure's units, and the measure's value is how many
-            units make one reference serving, which the nutrients are stored
-            per. So nutrients scale by grams / value, and servings is grams.
-            Deleting a measure moves its entries onto the recipe's "g"
-            measure. An entry whose measure is missing anyway (e.g. logged
-            with measureId 0) can't be scaled: the server then divides by a
-            value that isn't the default measure's, so this raises.
+        Scaling matches the server's day totals (verified live): Weight/Atomic
+        foods by grams / 100, whatever the measure; serving-based recipes (all
+        measures type Recipe) by grams / the measure's value, with grams a
+        count of its units. A recipe entry without its measure raises: the
+        server's divisor then isn't the default measure's.
 
         A get_foods failure raises, including an unknown food id. The diary
         dict is mutated in place and also returned. Non-Serving entries (Exercise,
@@ -2037,8 +2028,6 @@ class CronometerClient:
             measure = next(
                 (m for m in measures if m.get("id") == entry.get("measureId")), None
             )
-            # The server makes every measure of a serving-based recipe, even
-            # its "g", type Recipe (seen live); a mix has no known reading.
             recipe_flags = {m.get("type") == "Recipe" for m in measures}
             recipe = recipe_flags == {True}
             if len(recipe_flags) > 1:

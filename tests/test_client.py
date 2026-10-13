@@ -553,8 +553,7 @@ def test_enrich_diary_merges_names_measures_and_scaled_nutrients(tmp_path):
     assert oats["nutrients"] == {208: 778.0, 203: 33.8}
 
     milk = entries[1]
-    # Measure 999 is gone: no serving is described (not defaultMeasureId 20's
-    # "glass"), but grams are real grams, so 42 kcal/100g scaled to 50g -> 21.
+    # Measure 999 is gone: no serving (not the default's), still per 100 g.
     assert "serving_size" not in milk
     assert "servings" not in milk
     assert milk["nutrients"] == {208: 21.0}
@@ -612,11 +611,7 @@ def test_enrich_diary_measure_quantity(
     assert entry["servings"] == servings
 
 
-# The serving-based recipe below is the one probed live (ZZ test, retired):
-# 200 g of egg, 71.5 kcal stored per reference serving. After its "serving"
-# measure was deleted, the server re-created the "g" measure and moved the
-# entry logged by "serving" onto it. Each entry's expected energy is what the
-# server's own day total dropped by when that entry was deleted.
+# The serving-based recipe probed live; expected kcal are the server's own.
 LIVE_SERVING_RECIPE = {
     "id": 85100983,
     "name": "ZZ test serving recipe",
@@ -660,15 +655,12 @@ def test_enrich_recipe_scales_by_the_measure_value_like_the_server(
 
     assert entry["nutrients"][208] == pytest.approx(server_kcal, abs=1e-4)
     assert entry["serving_size"]["grams"] is None
-    # grams counts the measure's units.
     assert entry["servings"] == grams
 
 
 @pytest.mark.parametrize("measure_id", [0, 999, 313595230])
 def test_enrich_recipe_entry_without_its_measure_raises(tmp_path, measure_id):
-    # Live, a measure-0 entry (2) counted 0.715 kcal: 71.5 * 2 / 200, not the
-    # default measure's 71.5 * 2 / 4. With no rule for which value the server
-    # picks, the amount is refused rather than guessed.
+    # Live, measure 0 counted 71.5 * 2 / 200, not the default's 71.5 * 2 / 4.
     with pytest.raises(CronometerError, match=f"measure {measure_id}, which"):
         _enrich_one(tmp_path, LIVE_SERVING_RECIPE, measure_id, 2)
 
@@ -702,8 +694,7 @@ def test_enrich_mixed_recipe_and_weight_measures_raises(tmp_path):
 def test_enrich_weight_entry_without_its_measure_ignores_the_default(
     tmp_path, measure_id, default
 ):
-    # Live: an Atomic custom food's measure-0 entry (30 g) and its entry left on
-    # a deleted measure (100 g) counted 120 and 400 kcal, i.e. per 100 g.
+    # Live, such entries counted per 100 g.
     food = {
         "id": 100,
         "name": "Bar",
@@ -720,7 +711,6 @@ def test_enrich_weight_entry_without_its_measure_ignores_the_default(
 
 
 def test_enrich_recipe_entry_ignores_the_default_measure(tmp_path):
-    # The default is "full recipe" (value 4); the entry's own measure counts.
     entry = _enrich_one(tmp_path, LIVE_SERVING_RECIPE, 313595764, 1)
 
     assert entry["serving_size"]["unit"] == "portion"

@@ -56,8 +56,6 @@ FOODS = {
         "name": "Stew",
         "measures": [
             {"id": 20, "name": "bowl", "value": 1, "amount": 1, "type": "Recipe"},
-            # A serving-based recipe's "g" is a Recipe measure valued at the
-            # grams in one reference serving.
             {"id": 21, "name": "g", "value": 250, "amount": 1, "type": "Recipe"},
         ],
         "nutrients": [{"id": ENERGY, "amount": 400}, {"id": PROTEIN, "amount": 30}],
@@ -358,8 +356,6 @@ def test_failed_food_lookup_reports_its_cause(client):
 
 
 def test_unknown_food_is_the_servers_not_found_error(client, tmp_path):
-    # A real client against the fake server, which answers an unknown id with
-    # the live-captured FAIL; food 2 is known, food 1 isn't.
     real, _ = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[FOODS[2]]))
     client.get_foods.side_effect = real.get_foods
     client.diaries[date(2026, 10, 14)] = _diary(
