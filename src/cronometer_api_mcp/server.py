@@ -1096,8 +1096,7 @@ def get_food_details(food_id: int) -> str:
     available measure_ids needed for add_food_entry. For a recipe it also
     returns its ingredients (in update_recipe's input shape) and comments; a
     deleted (retired) food is flagged with "retired": true. default_measure_id
-    follows whichever measure was logged last (and may be 0), so it isn't
-    necessarily the food's serving.
+    is the measure logged last, not necessarily the serving.
 
     Args:
         food_id: Food ID from search_foods results.
@@ -1248,14 +1247,11 @@ def update_custom_food(
     with this tool, even though they also show as source "Custom".
 
     Nutrient amounts are per serving: the food's serving measure, or
-    serving_grams when you pass it. A food with one measure needs no
-    measure_id; with several, pass measure_id (from get_food_details) to say
-    which serving the nutrients and serving_* args refer to, or the edit is
-    refused. To change the serving weight without re-entering nutrition, pass
+    serving_grams when you pass it; with several measures, measure_id picks
+    it. To change the serving weight without re-entering nutrition, pass
     serving_grams alone; the stored per-100g values stay put, so the
     per-serving numbers scale with the new weight. Diary entries logged by
-    that measure keep their count of it, so they grow or shrink with it. A
-    "g" or "oz" measure can't be renamed or resized.
+    that measure are rescaled with it, so "g" and "oz" can't be resized.
 
     Args:
         food_id: ID of the custom food to edit.
@@ -1283,10 +1279,8 @@ def update_custom_food(
             gives "3 cookies = 30 g". To keep the per-unit weight, also pass
             serving_grams (45 here). Check the result with get_food_details,
             which lists each measure's quantity.
-        measure_id: The serving measure to edit, from get_food_details.
-            Required when the food has several measures; its
-            default_measure_id is just the measure logged last, so don't
-            assume it's the serving.
+        measure_id: The serving to edit, from get_food_details; required
+            when the food has several measures.
     """
     try:
         client = _get_client()

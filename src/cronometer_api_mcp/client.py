@@ -886,16 +886,9 @@ class CronometerClient:
         alone leaves the stored per-100g values as they are, so the food's
         per-serving numbers shift with the new weight.
 
-        The serving measure is the food's only measure, or measure_id when it
-        has several (see _custom_food_serving). Never defaultMeasureId: the
-        server moves that to whichever measure was logged last (verified
-        live), so trusting it edited a "g" measure after a gram-logged entry.
-        Diary entries logged by a measure keep its count, so resizing one
-        rescales every past entry logged by it (verified live: after "g" was
-        resized to a 250 g serving, a 100 g entry logged by it read back as
-        10,000 g). Hence
-        ambiguity is refused rather than guessed, and a "g" or "oz" measure
-        is never renamed or resized.
+        Resizing a measure rescales every diary entry logged by it (seen
+        live), so the measure is picked by _custom_food_serving, never guessed,
+        and a "g" or "oz" measure is never renamed or resized.
 
         A measure is `amount` units of `name` weighing `value` grams in total,
         and the app renders the serving as "<amount> <name>". Setting the
@@ -2389,13 +2382,8 @@ def _serving_fraction(batch_grams: float, servings_per_batch: float) -> float:
 
 
 def _custom_food_serving(food: dict, measure_id: int | None) -> dict:
-    """The custom food measure that update_custom_food edits.
-
-    measure_id when given (it must be one of the food's measures); otherwise
-    the food's only measure. With several and no measure_id it's ambiguous,
-    so that's refused: defaultMeasureId can't break the tie, since the server
-    sets it to the last-logged measure.
-    """
+    """measure_id's measure, else the sole one. Not defaultMeasureId: the
+    server moves it to the last-logged measure (seen live)."""
     measures = food.get("measures") or []
     label = f"Custom food {food['id']}"
     if not measures:

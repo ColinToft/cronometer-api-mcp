@@ -580,9 +580,6 @@ GRAM_MEASURE = {"id": 901, "name": "g", "amount": 1, "value": 1, "type": "Weight
 
 
 def two_measure_food(default: int) -> dict:
-    """A 50 g "serving" plus a "g" measure. The server moves defaultMeasureId
-    to whichever measure was logged last (verified live), so after a
-    gram-logged entry it points at "g"."""
     food = custom_food(defaultMeasureId=default)
     food["measures"].append(dict(GRAM_MEASURE))
     return food
@@ -602,8 +599,6 @@ SERVING_EDITS = [
 def test_update_custom_food_with_several_measures_requires_measure_id(
     tmp_path, default, kwargs
 ):
-    """Whatever defaultMeasureId says, several measures make the serving
-    ambiguous; nothing is saved."""
     client, state = make_cold_client(tmp_path, [two_measure_food(default)])
 
     with pytest.raises(
@@ -617,9 +612,6 @@ def test_update_custom_food_with_several_measures_requires_measure_id(
 
 @pytest.mark.parametrize("default", [900, 901, 0])
 def test_update_custom_food_measure_id_picks_the_serving(tmp_path, default):
-    """measure_id, not defaultMeasureId, decides which measure is edited and
-    which weight per-serving nutrients are scaled by; the other measure and
-    the default are left alone."""
     client, state = make_cold_client(tmp_path, [two_measure_food(default), OK])
 
     client.update_custom_food(FOOD_ID, measure_id=900, calories=150, serving_grams=75)
@@ -629,11 +621,10 @@ def test_update_custom_food_measure_id_picks_the_serving(tmp_path, default):
     serving, gram = data["measures"]
     assert (serving["id"], serving["value"], serving["amount"]) == (900, 75, 1.0)
     assert gram == GRAM_MEASURE
-    assert nutrients_by_id(state["payloads"][1])[208] == 200.0  # 150 per 75 g
+    assert nutrients_by_id(state["payloads"][1])[208] == 200.0
 
 
 def test_update_custom_food_measure_id_can_pick_the_gram_measure(tmp_path):
-    """Nutrients alone may be given per gram; the "g" measure itself stays."""
     client, state = make_cold_client(tmp_path, [two_measure_food(900), OK])
 
     client.update_custom_food(FOOD_ID, measure_id=901, calories=1.3, protein_g=0.11)
@@ -645,8 +636,6 @@ def test_update_custom_food_measure_id_can_pick_the_gram_measure(tmp_path):
 
 @pytest.mark.parametrize("default", [900, 0, 12345])
 def test_update_custom_food_sole_measure_ignores_default_measure_id(tmp_path, default):
-    """With one measure there's no ambiguity: a zero or stale defaultMeasureId
-    doesn't matter, and measure_id may name that measure explicitly."""
     food = custom_food(defaultMeasureId=default)
     client, state = make_cold_client(tmp_path, [food, OK, food, OK])
 
@@ -668,8 +657,6 @@ def test_update_custom_food_refuses_unknown_measure_id(tmp_path, food):
 
 
 def test_update_custom_food_refuses_measure_id_without_serving_edit(tmp_path):
-    """measure_id with nothing it applies to is a caller mistake; refused
-    before any request."""
     client, state = make_cold_client(tmp_path, [])
 
     with pytest.raises(ValueError, match="pass it only with those"):
@@ -682,8 +669,6 @@ def test_update_custom_food_refuses_measure_id_without_serving_edit(tmp_path):
 def test_update_custom_food_refuses_renaming_or_resizing_weight_unit(
     tmp_path, unit, kwargs
 ):
-    """Resizing a measure rescales the diary entries logged by it (seen live:
-    after "g" became a 250 g serving, a 100 g entry read back as 10,000 g)."""
     food = custom_food()
     food["measures"][0].update(name=unit, value=1)
     client, state = make_cold_client(tmp_path, [food])
