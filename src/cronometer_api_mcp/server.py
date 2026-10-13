@@ -82,6 +82,18 @@ mcp = MCPServer(
 _DIARY_GROUPS = {"breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
 _DIARY_GROUP_NAMES = {number: name for name, number in _DIARY_GROUPS.items()}
 
+
+def _meal_group_for_hour(hour: int) -> int:
+    """The diary group add_food_entry's "auto" picks for an hour of the day."""
+    if 4 <= hour < 10:
+        return _DIARY_GROUPS["breakfast"]
+    if 10 <= hour < 14:
+        return _DIARY_GROUPS["lunch"]
+    if 14 <= hour < 21:
+        return _DIARY_GROUPS["dinner"]
+    return _DIARY_GROUPS["snacks"]
+
+
 _client: CronometerClient | None = None
 # Guards the lazy construction below. SDK 2.x dispatches sync tool handlers on
 # worker threads, so concurrent first-calls would otherwise build a client each,
@@ -627,46 +639,38 @@ def add_food_entry(
 
     Use search_foods to find food_id and measure_id, then
     get_food_details to confirm serving sizes and gram weights.
+    add_food_entries does the same for many entries; this goes through its
+    checks (the food exists, measure_id is one of its measures and not 0)
+    and returns its result, {"added": [{date, serving_id}], "count": 1}.
 
     Args:
         food_id: Numeric food ID from search_foods results.
-        measure_id: Measure/unit ID from get_food_details.
+        measure_id: Measure/unit ID from get_food_details (0 is refused).
         grams: Weight of the serving in grams.
         date: Date to log as YYYY-MM-DD (defaults to today).
         translation_id: Translation ID from search results (usually 0).
         diary_group: Meal slot -- one of "auto", "breakfast", "lunch",
                      "dinner", "snacks" (case-insensitive, default "auto").
+                     "auto" picks by the current hour in the account's
+                     timezone: breakfast 4-10, lunch 10-14, dinner 14-21,
+                     snacks otherwise.
     """
     try:
-        group_map = {"auto": 0, **_DIARY_GROUPS}
-        group_key = diary_group.strip().lower()
-        group_int = group_map.get(group_key)
-        if group_int is None:
-            return _err(
-                ValueError(
-                    f"Invalid diary_group '{diary_group}'. "
-                    "Must be one of: auto, breakfast, lunch, dinner, snacks."
-                )
-            )
-
-        client = _get_client()
-        day = _parse_date(date)
-        result = client.add_serving(
-            food_id=food_id,
-            measure_id=measure_id,
-            grams=grams,
-            translation_id=translation_id,
-            day=day,
-            diary_group=group_int,
-        )
-        return _ok(
-            {
-                "entry": result,
-                "note": "Use the serving ID to remove this entry with remove_food_entry.",
-            }
-        )
+        if isinstance(diary_group, str) and diary_group.strip().lower() == "auto":
+            hour = _get_client().now().hour
+            diary_group = _DIARY_GROUP_NAMES[_meal_group_for_hour(hour)]
+        day = date if date is not None else date_module_today().isoformat()
     except Exception as e:
         return _err(e)
+    entry = {
+        "food_id": food_id,
+        "measure_id": measure_id,
+        "grams": grams,
+        "date": day,
+        "diary_group": diary_group,
+        "translation_id": translation_id,
+    }
+    return add_food_entries([entry])
 
 
 @mcp.tool(annotations=_WRITE)
@@ -792,7 +796,7 @@ def remove_food_entry(
         date: Date the entries belong to as YYYY-MM-DD (defaults to today).
     """
     try:
-        day = date or date_module_today().isoformat()
+        day = date if date is not None else date_module_today().isoformat()
         for eid in entry_ids:
             if not (isinstance(eid, str) and eid.isdigit()):
                 raise ValueError(f"entry_ids must be digit strings, got {eid!r}")

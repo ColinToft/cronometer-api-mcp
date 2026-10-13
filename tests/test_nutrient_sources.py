@@ -521,44 +521,8 @@ def test_unknown_diary_shape_fails(client, response):
 
 
 # ---------------------------------------------------------------------------
-# add_food_entry shares the diary-group names
+# Diary-group names
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "group,expected",
-    [
-        ("auto", 0),
-        ("breakfast", 1),
-        ("Lunch", 2),
-        (" DINNER ", 3),
-        ("snacks", 4),
-    ],
-)
-def test_add_food_entry_diary_groups(client, group, expected):
-    client.add_serving.return_value = {"id": 1}
-
-    result = json.loads(
-        server.add_food_entry(
-            food_id=1, measure_id=2, grams=3, date="2026-10-14", diary_group=group
-        )
-    )
-
-    assert result["status"] == "success"
-    assert client.add_serving.call_args.kwargs["diary_group"] == expected
-
-
-@pytest.mark.parametrize("group", ["brunch", "", "1"])
-def test_add_food_entry_rejects_unknown_group(client, group):
-    result = json.loads(
-        server.add_food_entry(food_id=1, measure_id=2, grams=3, diary_group=group)
-    )
-
-    assert result["status"] == "error"
-    assert (
-        "Must be one of: auto, breakfast, lunch, dinner, snacks." in result["message"]
-    )
-    client.add_serving.assert_not_called()
 
 
 def test_diary_group_maps_are_inverse():

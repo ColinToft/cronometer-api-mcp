@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from cronometer_api_mcp import server
 from cronometer_api_mcp.client import _FALLBACK_TIMEZONE, CronometerClient
 
 
@@ -73,17 +74,15 @@ def frozen_utc(monkeypatch):
 
 def test_stamps_in_account_timezone_not_host(tmp_path, frozen_utc):
     """Los Angeles account, UTC host: 18:01 UTC must record as 11:01 local,
-    land on today's LA date, and auto-group as Lunch (not Dinner)."""
+    and land on today's LA date."""
     client = _client(tmp_path, "America/Los_Angeles")
     captured = _capture_serving(client)
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     serving = captured["payload"]["serving"]
     assert serving["time"] == "11:1:30"
     assert serving["day"] == "2026-7-27"
-    # 11:00 local -> Lunch (group 2); order == (2 << 16) | 1
-    assert serving["order"] == (2 << 16) | 1
     # Matches the native app: no offset stored alongside the wall-clock time.
     assert serving["offset"] is None
 
@@ -94,7 +93,7 @@ def test_day_bucketing_respects_account_timezone(tmp_path, frozen_utc):
     client = _client(tmp_path, "America/Los_Angeles")
     captured = _capture_serving(client)
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     assert captured["payload"]["serving"]["day"] == "2026-7-27"
     assert client.today() == _dt.date(2026, 7, 27)
@@ -106,19 +105,49 @@ def test_explicit_day_is_unchanged(tmp_path, frozen_utc):
     client = _client(tmp_path, "America/Los_Angeles")
     captured = _capture_serving(client)
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0, day=_dt.date(2026, 1, 5))
+    client.add_serving(
+        food_id=1, measure_id=2, grams=100.0, diary_group=2, day=_dt.date(2026, 1, 5)
+    )
 
     assert captured["payload"]["serving"]["day"] == "2026-1-5"
 
 
-def test_explicit_diary_group_skips_auto(tmp_path, frozen_utc):
-    """A caller-chosen meal group is never overridden by the hour heuristic."""
+def test_auto_group_uses_account_hour_not_host(tmp_path, frozen_utc, monkeypatch):
+    """add_food_entry's "auto": 18:01 UTC is 11:01 in LA, so lunch, not the
+    snacks a UTC host hour would pick."""
+    client = _client(tmp_path, "America/Los_Angeles")
+    monkeypatch.setattr(server, "_client", client)
+    captured = _capture_serving(client)
+    monkeypatch.setattr(server, "add_food_entries", lambda entries: entries)
+
+    (entry,) = server.add_food_entry(food_id=1, measure_id=2, grams=100.0)
+
+    assert entry["diary_group"] == "lunch"
+    assert entry["date"] == "2026-07-27"
+    assert captured == {}  # resolving "auto" sends nothing
+
+
+@pytest.mark.parametrize(
+    "group,order", [(1, 65537), (2, 131073), (3, 196609), (4, 262145)]
+)
+def test_diary_group_sets_the_order(tmp_path, frozen_utc, group, order):
     client = _client(tmp_path, "America/Los_Angeles")
     captured = _capture_serving(client)
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0, diary_group=3)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=group)
 
-    assert captured["payload"]["serving"]["order"] == (3 << 16) | 1
+    assert captured["payload"]["serving"]["order"] == order
+
+
+@pytest.mark.parametrize("group", [0, 5, -1, None, "2"])
+def test_add_serving_refuses_a_group_outside_1_to_4(tmp_path, frozen_utc, group):
+    client = _client(tmp_path, "America/Los_Angeles")
+    captured = _capture_serving(client)
+
+    with pytest.raises(ValueError, match="diary_group must be 1-4"):
+        client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=group)
+
+    assert captured == {}
 
 
 def test_login_captures_account_timezone(tmp_path, monkeypatch):
@@ -261,7 +290,7 @@ def test_env_override_stamps_entries(tmp_path, monkeypatch, frozen_utc):
     client._timezone = client._resolve_timezone("America/New_York")
     captured = _capture_serving(client)
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     serving = captured["payload"]["serving"]
     # 18:01 UTC -> 11:01 PDT (Los Angeles), not 14:01 EDT.
@@ -352,13 +381,11 @@ def test_first_add_serving_in_a_cold_client_stamps_in_account_zone(
     client, captured = _cold_client(tmp_path, "America/Los_Angeles")
 
     assert client._timezone is None  # nothing resolved yet
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     serving = captured["payload"]["serving"]
     assert serving["time"] == "11:1:30"
     assert serving["day"] == "2026-7-27"
-    # Lunch; Eastern would have made it Dinner.
-    assert serving["order"] == (2 << 16) | 1
 
 
 def test_cold_client_day_bucketing_uses_account_zone(tmp_path, monkeypatch):
@@ -380,7 +407,7 @@ def test_cold_client_day_bucketing_uses_account_zone(tmp_path, monkeypatch):
     monkeypatch.setattr("cronometer_api_mcp.client.datetime", LateEvening)
     client, captured = _cold_client(tmp_path, "America/Los_Angeles")
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     assert captured["payload"]["serving"]["day"] == "2026-7-27"
 

@@ -1,4 +1,4 @@
-"""add_food_entries / remove_food_entries (and remove_food_entry on top).
+"""add_food_entries / remove_food_entries (and the singular tools on top).
 
 A real CronometerClient runs against FakeDiaryServer, so every request the
 tools send is counted: validation must fail before any request, and a
@@ -10,8 +10,9 @@ from __future__ import annotations
 import copy
 import json
 import re
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from test_client import FakeFoodServer, make_server_client
@@ -293,6 +294,169 @@ def test_add_reports_a_response_without_an_id_as_a_failure(fake, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# add_food_entry: one entry, through the same checks
+# ---------------------------------------------------------------------------
+
+
+def _add_one(**overrides):
+    kwargs = {"food_id": 1234, "measure_id": 3773, "grams": 100, "date": D1}
+    return json.loads(server.add_food_entry(**{**kwargs, **overrides}))
+
+
+def _at_hour(monkeypatch, hour):
+    monkeypatch.setattr(
+        server._client,
+        "now",
+        lambda: datetime(
+            2026, 10, 13, hour, 30, tzinfo=ZoneInfo("America/Los_Angeles")
+        ),
+    )
+
+
+def test_add_food_entry_logs_through_the_batch_path(fake):
+    f = fake()
+    result = _add_one(
+        food_id=85013904,
+        measure_id=313190451,
+        grams=570,
+        diary_group=" Dinner ",
+        translation_id=7,
+    )
+
+    assert result == {
+        "status": "success",
+        "added": [{"date": D1, "serving_id": 5000}],
+        "count": 1,
+    }
+    assert f.state["endpoints"] == ["get_foods", "add_serving"]
+    assert f.state["payloads"][0]["ids"] == [85013904]
+    sent = f.state["payloads"][1]["serving"]
+    assert (sent["day"], sent["order"], sent["measureId"], sent["translationId"]) == (
+        "2027-3-15",
+        (3 << 16) | 1,
+        313190451,
+        7,
+    )
+    assert _logged(f, D1) == [(85013904, 3, 570)]
+
+
+@pytest.mark.parametrize(
+    "group,number", [("breakfast", 1), ("Lunch", 2), (" DINNER ", 3), ("snacks", 4)]
+)
+def test_add_food_entry_explicit_groups(fake, group, number):
+    f = fake()
+    assert _add_one(diary_group=group)["count"] == 1
+    assert _logged(f, D1) == [(1234, number, 100)]
+
+
+@pytest.mark.parametrize(
+    "hour,number",
+    [
+        (0, 4),
+        (3, 4),
+        (4, 1),
+        (9, 1),
+        (10, 2),
+        (13, 2),
+        (14, 3),
+        (20, 3),
+        (21, 4),
+        (23, 4),
+    ],
+)
+def test_add_food_entry_auto_resolves_by_account_hour(fake, monkeypatch, hour, number):
+    f = fake()
+    _at_hour(monkeypatch, hour)
+
+    assert _add_one(diary_group="auto")["count"] == 1
+    assert _logged(f, D1) == [(1234, number, 100)]
+    assert f.state["payloads"][1]["serving"]["order"] == (number << 16) | 1
+
+
+def test_add_food_entry_defaults_to_auto(fake, monkeypatch):
+    f = fake()
+    _at_hour(monkeypatch, 12)
+
+    assert _add_one()["count"] == 1
+    assert _logged(f, D1) == [(1234, 2, 100)]
+
+
+@pytest.mark.parametrize("group", [" AUTO ", "Auto"])
+def test_add_food_entry_auto_is_case_insensitive(fake, monkeypatch, group):
+    f = fake()
+    _at_hour(monkeypatch, 7)
+
+    assert _add_one(diary_group=group)["count"] == 1
+    assert _logged(f, D1) == [(1234, 1, 100)]
+
+
+def test_add_food_entry_defaults_to_today(fake, monkeypatch):
+    f = fake()
+    monkeypatch.setattr(server._client, "today", lambda: date(2027, 3, 16))
+
+    result = json.loads(
+        server.add_food_entry(
+            food_id=1234, measure_id=3773, grams=100, diary_group="lunch"
+        )
+    )
+
+    assert result["added"] == [{"date": D2, "serving_id": 5000}]
+    assert _logged(f, D2) == [(1234, 2, 100)]
+
+
+def test_add_food_entry_refuses_a_measure_of_another_food(fake):
+    f = fake()
+    result = _add_one(measure_id=313190451, diary_group="lunch")
+
+    assert result["status"] == "error"
+    assert "measure_id 313190451 is not a measure of 'Egg'" in result["message"]
+    assert "{3773: 'large'}" in result["message"]
+    assert f.state["endpoints"] == ["get_foods"]
+    assert f.diary == {}
+
+
+def test_add_food_entry_refuses_an_unknown_food(fake):
+    f = fake()
+    result = _add_one(food_id=999, diary_group="lunch")
+
+    assert result["status"] == "error"
+    assert "food_id 999 not found" in result["message"]
+    assert f.state["endpoints"] == ["get_foods"]
+    assert f.diary == {}
+
+
+@pytest.mark.parametrize(
+    "overrides,match",
+    [
+        ({"measure_id": 0}, "measure_id must be a positive integer"),
+        ({"food_id": 0}, "food_id must be a positive integer"),
+        ({"grams": 0}, "grams must be a positive number"),
+        ({"grams": float("nan")}, "grams must be a positive number"),
+        ({"date": "2027-3-15"}, "date must be YYYY-MM-DD"),
+        ({"translation_id": -1}, "translation_id must be a non-negative"),
+        ({"date": ""}, "date must be YYYY-MM-DD"),
+        ({"diary_group": "brunch"}, "diary_group must be breakfast"),
+        ({"diary_group": ""}, "diary_group must be breakfast"),
+        ({"diary_group": "1"}, "diary_group must be breakfast"),
+        ({"diary_group": 3}, "diary_group must be breakfast"),
+    ],
+)
+def test_add_food_entry_rejects_bad_fields_before_any_request(
+    fake, monkeypatch, overrides, match
+):
+    f = fake()
+    monkeypatch.setattr(
+        server._client, "now", lambda: pytest.fail("now() must not be called")
+    )
+    overrides.setdefault("diary_group", "lunch")
+    result = _add_one(**overrides)
+
+    assert result["status"] == "error"
+    assert re.search(match, result["message"])
+    assert f.state["endpoints"] == []
+
+
+# ---------------------------------------------------------------------------
 # remove_food_entries
 # ---------------------------------------------------------------------------
 
@@ -468,6 +632,15 @@ def test_remove_food_entry_unknown_id_is_an_error_not_a_silent_zero(fake):
     assert result["status"] == "error"
     assert "entries[1] (serving_id 4 on 2027-03-15)" in result["message"]
     assert f.deletes == []
+
+
+def test_remove_food_entry_refuses_an_empty_date(fake):
+    f = fake()
+    result = json.loads(server.remove_food_entry(["1"], date=""))
+
+    assert result["status"] == "error"
+    assert "date must be YYYY-MM-DD" in result["message"]
+    assert f.state["endpoints"] == []
 
 
 @pytest.mark.parametrize("bad", ["12a", "", "-5", 5])
