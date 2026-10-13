@@ -253,8 +253,9 @@ food = client.get_food(results[0]["id"])
 # Log a serving
 client.add_serving(
     food_id=food["id"],
-    measure_id=food["defaultMeasureId"],
+    measure_id=food["measures"][0]["id"],
     grams=200,
+    diary_group=3,  # 1 breakfast, 2 lunch, 3 dinner, 4 snacks
 )
 
 # Get today's diary

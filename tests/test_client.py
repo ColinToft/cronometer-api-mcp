@@ -109,7 +109,7 @@ def test_add_serving_does_not_return_success_wrapper_on_failure(tmp_path):
     client, state = make_client(tmp_path, [REAL_FAIL_BODY, REAL_FAIL_BODY])
 
     with pytest.raises(CronometerError):
-        client.add_serving(food_id=1, measure_id=0, grams=100.0)
+        client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     assert state["post"] == 2
 
@@ -293,7 +293,7 @@ def test_add_serving_cold_start_embeds_real_user_id(tmp_path):
     """First write on a cold client logs in once and sends the real userId."""
     client, state = make_cold_client(tmp_path, [{"result": "SUCCESS", "id": 7}])
 
-    client.add_serving(food_id=1, measure_id=0, grams=100.0)
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=2)
 
     assert state["login"] == 1
     assert state["post"] == 1  # no stale-payload double failure (#31)

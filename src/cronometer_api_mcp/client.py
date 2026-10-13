@@ -1671,34 +1671,31 @@ class CronometerClient:
     def add_serving(
         self,
         food_id: int,
-        measure_id: int | None,
+        measure_id: int,
         grams: float,
+        *,
+        diary_group: int,
         translation_id: int = 0,
         day: date | None = None,
-        diary_group: int = 0,
     ) -> dict:
         """Log a food serving to the diary.
 
         Args:
             food_id: Cronometer food ID.
-            measure_id: Measure/unit ID. Get this from search_food() results
-                        (measureId field) or get_food() (defaultMeasureId or measures[].id).
-                        0 is only valid for user-created custom foods; database-sourced
-                        foods (CRDB/NCCDB/FDC) require a real measure ID.
+            measure_id: Measure/unit ID, one of get_food()'s measures[].id.
             grams: Weight in grams.
             translation_id: Translation ID (from search results, usually 0).
             day: Date to log to. Defaults to today.
-            diary_group: Meal group. 0 = auto (based on time of day),
-                         1 = Breakfast, 2 = Lunch, 3 = Dinner, 4 = Snacks.
+            diary_group: Meal group: 1 = Breakfast, 2 = Lunch, 3 = Dinner,
+                         4 = Snacks.
 
         Returns the serving confirmation dict from the API.
         """
+        if diary_group not in (1, 2, 3, 4):
+            raise ValueError(f"diary_group must be 1-4, got {diary_group!r}")
         now = self.now()
         day_str = self._format_day(day)
         time_str = f"{now.hour}:{now.minute}:{now.second}"
-
-        if diary_group == 0:
-            diary_group = _meal_group_for_hour(now.hour)
 
         serving = {
             "order": (diary_group << 16) | 1,
@@ -1710,7 +1707,7 @@ class CronometerClient:
             "servingId": None,
             "type": "Serving",
             "foodId": food_id,
-            "measureId": measure_id or 0,
+            "measureId": measure_id,
             "grams": grams,
             "translationId": translation_id,
         }
@@ -2418,18 +2415,3 @@ def _translation_id(food: dict) -> int:
         if isinstance(first, dict):
             return first.get("translationId") or 0
     return 0
-
-
-def _meal_group_for_hour(hour: int) -> int:
-    """Map hour of day to a Cronometer diary meal group.
-
-    1 = Breakfast, 2 = Lunch, 3 = Dinner, 4 = Snacks.
-    """
-    if 4 <= hour < 10:
-        return 1  # Breakfast
-    elif 10 <= hour < 14:
-        return 2  # Lunch
-    elif 14 <= hour < 21:
-        return 3  # Dinner
-    else:
-        return 4  # Snacks

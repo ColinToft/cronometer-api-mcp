@@ -13,12 +13,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from .client import (
-    NUTRIENT_IDS,
-    CronometerClient,
-    _is_positive_number,
-    _meal_group_for_hour,
-)
+from .client import NUTRIENT_IDS, CronometerClient, _is_positive_number
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,6 +81,18 @@ mcp = MCPServer(
 # Cronometer's default diary groups. An entry's group is its order >> 16.
 _DIARY_GROUPS = {"breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
 _DIARY_GROUP_NAMES = {number: name for name, number in _DIARY_GROUPS.items()}
+
+
+def _meal_group_for_hour(hour: int) -> int:
+    """The diary group add_food_entry's "auto" picks for an hour of the day."""
+    if 4 <= hour < 10:
+        return _DIARY_GROUPS["breakfast"]
+    if 10 <= hour < 14:
+        return _DIARY_GROUPS["lunch"]
+    if 14 <= hour < 21:
+        return _DIARY_GROUPS["dinner"]
+    return _DIARY_GROUPS["snacks"]
+
 
 _client: CronometerClient | None = None
 # Guards the lazy construction below. SDK 2.x dispatches sync tool handlers on
@@ -649,16 +656,10 @@ def add_food_entry(
                      snacks otherwise.
     """
     try:
-        group = diary_group.strip().lower() if isinstance(diary_group, str) else None
-        if group == "auto":
+        if isinstance(diary_group, str) and diary_group.strip().lower() == "auto":
             hour = _get_client().now().hour
-            group = _DIARY_GROUP_NAMES[_meal_group_for_hour(hour)]
-        elif group not in _DIARY_GROUPS:
-            raise ValueError(
-                "diary_group must be auto, breakfast, lunch, dinner, or snacks, "
-                f"got {diary_group!r}"
-            )
-        day = date or date_module_today().isoformat()
+            diary_group = _DIARY_GROUP_NAMES[_meal_group_for_hour(hour)]
+        day = date if date is not None else date_module_today().isoformat()
     except Exception as e:
         return _err(e)
     entry = {
@@ -666,7 +667,7 @@ def add_food_entry(
         "measure_id": measure_id,
         "grams": grams,
         "date": day,
-        "diary_group": group,
+        "diary_group": diary_group,
         "translation_id": translation_id,
     }
     return add_food_entries([entry])
@@ -795,7 +796,7 @@ def remove_food_entry(
         date: Date the entries belong to as YYYY-MM-DD (defaults to today).
     """
     try:
-        day = date or date_module_today().isoformat()
+        day = date if date is not None else date_module_today().isoformat()
         for eid in entry_ids:
             if not (isinstance(eid, str) and eid.isdigit()):
                 raise ValueError(f"entry_ids must be digit strings, got {eid!r}")

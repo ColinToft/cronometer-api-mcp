@@ -434,10 +434,11 @@ def test_add_food_entry_refuses_an_unknown_food(fake):
         ({"grams": float("nan")}, "grams must be a positive number"),
         ({"date": "2027-3-15"}, "date must be YYYY-MM-DD"),
         ({"translation_id": -1}, "translation_id must be a non-negative"),
-        ({"diary_group": "brunch"}, "diary_group must be auto, breakfast"),
-        ({"diary_group": ""}, "diary_group must be auto, breakfast"),
-        ({"diary_group": "1"}, "diary_group must be auto, breakfast"),
-        ({"diary_group": 3}, "diary_group must be auto, breakfast"),
+        ({"date": ""}, "date must be YYYY-MM-DD"),
+        ({"diary_group": "brunch"}, "diary_group must be breakfast"),
+        ({"diary_group": ""}, "diary_group must be breakfast"),
+        ({"diary_group": "1"}, "diary_group must be breakfast"),
+        ({"diary_group": 3}, "diary_group must be breakfast"),
     ],
 )
 def test_add_food_entry_rejects_bad_fields_before_any_request(
@@ -631,6 +632,15 @@ def test_remove_food_entry_unknown_id_is_an_error_not_a_silent_zero(fake):
     assert result["status"] == "error"
     assert "entries[1] (serving_id 4 on 2027-03-15)" in result["message"]
     assert f.deletes == []
+
+
+def test_remove_food_entry_refuses_an_empty_date(fake):
+    f = fake()
+    result = json.loads(server.remove_food_entry(["1"], date=""))
+
+    assert result["status"] == "error"
+    assert "date must be YYYY-MM-DD" in result["message"]
+    assert f.state["endpoints"] == []
 
 
 @pytest.mark.parametrize("bad", ["12a", "", "-5", 5])
