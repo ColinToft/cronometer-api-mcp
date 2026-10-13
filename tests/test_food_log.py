@@ -40,7 +40,7 @@ FOODS = {
         "name": "Egg",
         "defaultMeasureId": 10,
         "measures": [
-            {"id": 10, "name": "large", "value": 50, "amount": 1, "type": "Atomic"},
+            {"id": 10, "name": "large", "value": 50, "amount": 1, "type": "Weight"},
             {"id": 11, "name": "g", "value": 1, "amount": 1, "type": "Weight"},
         ],
         "nutrients": [

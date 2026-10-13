@@ -390,6 +390,12 @@ class FakeFoodServer:
             food["id"] = self.next_id
             self.next_id += 1
             food["source"] = "Custom"
+        new_food = food["id"] == self.next_id - 1 and food["id"] not in self.foods
+        if new_food and all(m["name"] != "g" for m in food["measures"]):
+            # Live: a new food without a "g" measure gets one.
+            food["measures"].append(
+                {"id": 0, "name": "g", "value": 1, "amount": 1, "type": "Weight"}
+            )
         for m in food["measures"]:
             if not m["id"]:
                 m["id"] = self.next_measure_id
@@ -398,7 +404,15 @@ class FakeFoodServer:
         if not food.get("defaultMeasureId") and not _only_gram(food):
             food["defaultMeasureId"] = food["measures"][0]["id"]
         if food.get("ingredients"):
-            batch = sum(i["grams"] for i in food["ingredients"])
+            # Live: unweighable ingredients add nutrients but not grams.
+            batch = sum(
+                i["grams"]
+                for i in food["ingredients"]
+                if all(
+                    m["type"] == "Weight"
+                    for m in self.ingredient_foods[i["foodId"]]["measures"]
+                )
+            )
             for m in food["measures"]:
                 if m["name"] == "full recipe":
                     m["value"] = batch
@@ -409,8 +423,9 @@ class FakeFoodServer:
                         totals[n["id"]] = (
                             totals.get(n["id"], 0) + n["amount"] * i["grams"] / 100
                         )
+                # Live: a 0 g batch stores the totals as the per-100 g amounts.
                 food["nutrients"] = [
-                    {"id": nid, "amount": amount * 100 / batch}
+                    {"id": nid, "amount": amount * 100 / (batch or 100)}
                     for nid, amount in sorted(totals.items())
                 ]
         self.foods[food["id"]] = food
@@ -1492,6 +1507,7 @@ def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
     assert state["endpoints"] == ["add_food", "get_food"]
     (measure,) = state["payloads"][0]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == (name, amount, 30)
+    assert measure["type"] == "Weight"
     assert result == {"food_id": 4242, "measure_id": 9000}
 
 
@@ -1509,12 +1525,13 @@ def test_create_custom_food_resends_reparsed_serving(tmp_path, serving_name):
     assert state["endpoints"] == ["add_food", "get_food", "add_food", "get_food"]
     sent = state["payloads"][2]["data"]
     assert sent["nutrients"] == state["payloads"][0]["data"]["nutrients"]
-    (measure,) = server.foods[result["food_id"]]["measures"]
+    measure, gram = server.foods[result["food_id"]]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == (
         serving_name,
         1,
         250,
     )
+    assert (gram["name"], gram["value"], gram["type"]) == ("g", 1, "Weight")
 
 
 def test_create_custom_food_raises_with_id_when_serving_wont_settle(tmp_path):
@@ -1595,7 +1612,7 @@ def test_create_custom_food_failure_after_save_names_the_id(
         (lambda food: food.update(measures=[]), "has no serving measure"),
         (
             lambda food: food["measures"].append({**food["measures"][0], "id": 1}),
-            r"has 2 measures \(id, name, grams\) \[\(9000, 'serving', 100",
+            r"has 3 measures \(id, name, grams\) \[\(9000, 'serving', 100",
         ),
     ],
 )
@@ -1675,11 +1692,12 @@ _CUP = {"id": 9001, "name": "cup", "value": 240, "amount": 1, "type": "Atomic"}
 @pytest.mark.parametrize("kwargs", [{"calories": 3}, {"serving_grams": 2}])
 def test_update_custom_food_two_measures_need_measure_id(tmp_path, kwargs):
     client, state, fake, _ = _create_gram_food(tmp_path)
-    fake.foods[4242]["measures"].append(dict(_CUP))
+    fake.foods[4242]["measures"] += [dict(_CUP), {**_CUP, "id": 9002, "name": "bowl"}]
 
     with pytest.raises(
         CronometerError,
-        match=r"has 2 measures .*\(9000, 'g', 1\), \(9001, 'cup', 240\)\]; pass measure_id",
+        match=r"has 3 measures .*\(9000, 'g', 1\), \(9001, 'cup', 240\), "
+        r"\(9002, 'bowl', 240\)\]; pass measure_id",
     ):
         client.update_custom_food(4242, **kwargs)
     assert state["endpoints"] == ["add_food", "get_food", "get_food"]
@@ -1731,7 +1749,7 @@ def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
 
 def test_update_custom_food_tool_passes_measure_id(tmp_path, monkeypatch):
     client, _, fake, _ = _create_gram_food(tmp_path)
-    fake.foods[4242]["measures"].append(dict(_CUP))
+    fake.foods[4242]["measures"] += [dict(_CUP), {**_CUP, "id": 9002, "name": "bowl"}]
     monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
 
     refused = json.loads(mcp_server.update_custom_food(4242, calories=120))
@@ -1741,3 +1759,18 @@ def test_update_custom_food_tool_passes_measure_id(tmp_path, monkeypatch):
     out = json.loads(mcp_server.update_custom_food(4242, calories=120, measure_id=9001))
     assert out["status"] == "success"
     assert {n["id"]: n["amount"] for n in fake.foods[4242]["nutrients"]}[208] == 50.0
+
+
+def test_created_custom_food_takes_per_serving_edits_without_measure_id(tmp_path):
+    fake = FakeFoodServer()
+    client, _ = make_server_client(tmp_path, fake)
+    created = _create(client, serving_name="bar", serving_grams=40)
+
+    client.update_custom_food(4242, calories=120)
+
+    food = fake.foods[4242]
+    assert [(m["id"], m["name"]) for m in food["measures"]] == [
+        (created["measure_id"], "bar"),
+        (9001, "g"),
+    ]
+    assert {n["id"]: n["amount"] for n in food["nutrients"]}[208] == 300.0

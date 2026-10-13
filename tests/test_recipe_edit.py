@@ -24,12 +24,13 @@ from cronometer_api_mcp.client import CronometerError
 RECIPE_ID = 85008439
 OK = {"result": "SUCCESS", "messages": [], "id": RECIPE_ID}
 
+# Live, these three have only "Weight" measures.
 BANANA = {
     "id": 450856,
     "name": "Banana, Fresh",
     "defaultMeasureId": 998940,
     "measures": [
-        {"id": 998940, "name": "medium", "value": 118, "amount": 1, "type": "Atomic"},
+        {"id": 998940, "name": "medium", "value": 118, "amount": 1, "type": "Weight"},
         {"id": 998949, "name": "g", "value": 1, "amount": 1, "type": "Weight"},
     ],
     "translations": [{"translationId": 398492, "name": "Banana, Fresh"}],
@@ -40,7 +41,7 @@ EGG = {
     "name": "Egg, whole",
     "defaultMeasureId": 3770,
     "measures": [
-        {"id": 3770, "name": "large", "value": 50, "amount": 1, "type": "Atomic"},
+        {"id": 3770, "name": "large", "value": 50, "amount": 1, "type": "Weight"},
         {"id": 3776, "name": "g", "value": 1, "amount": 1, "type": "Weight"},
     ],
     "translations": [{"translationId": 1893, "name": "Egg, whole"}],
@@ -59,7 +60,7 @@ PB = {
     "name": "Peanut Butter",
     "defaultMeasureId": 1960,
     "measures": [
-        {"id": 1960, "name": "tbsp", "value": 16, "amount": 1, "type": "Atomic"}
+        {"id": 1960, "name": "tbsp", "value": 16, "amount": 1, "type": "Weight"}
     ],
     "nutrients": [{"id": 208, "amount": 588.0}, {"id": 204, "amount": 50.0}],
 }
@@ -181,7 +182,7 @@ def endpoints(state) -> list[str]:
     return state["endpoints"]
 
 
-SAVE = ["get_food", "add_food", "get_food"]  # fetch, save, read back
+SAVE = ["get_food", "get_foods", "add_food", "get_food"]
 
 
 def add_food_payloads(state) -> list[dict]:
@@ -478,11 +479,7 @@ def test_non_serving_edits_ignore_the_serving(tmp_path, kind, kwargs):
 
     result = client.update_recipe(RECIPE_ID, **kwargs)
 
-    assert endpoints(state) == [
-        e
-        for e in ["get_food", "get_foods", "add_food", "get_food"]
-        if e != "get_foods" or "ingredients" in kwargs
-    ]
+    assert endpoints(state) == SAVE  # kept ingredients are checked too
     assert saved(state)["measures"] == food["measures"]
     assert "serving" not in result and "servings_per_batch" not in result
 
@@ -817,7 +814,7 @@ def test_save_failure_body_raises_after_one_retry(tmp_path):
     with pytest.raises(CronometerError, match="nope"):
         client.update_recipe(RECIPE_ID, name="X")
 
-    assert endpoints(state) == ["get_food", "add_food", "add_food"]  # retried once
+    assert endpoints(state) == ["get_food", "get_foods", "add_food", "add_food"]
 
 
 def test_update_custom_food_still_refuses_recipes(tmp_path):
@@ -1753,8 +1750,9 @@ def test_batch_weight_set_in_app_is_refused(tmp_path, full_id):
     if full_id:
         with pytest.raises(
             CronometerError,
-            match=r"batch weight \(500 g\) was set in the Cronometer app and "
-            r"doesn't match its ingredients \(152 g\); edit it there",
+            match=r"stored batch weight \(500 g\) doesn't match its ingredients "
+            r"\(152 g\): it was set in the Cronometer app, or an ingredient's "
+            r"grams don't count toward it",
         ):
             client.update_recipe(RECIPE_ID, name="X")
         assert endpoints(state) == ["get_food"]
@@ -1797,3 +1795,250 @@ def test_update_recipe_timeout_on_read_back_says_it_was_saved(tmp_path):
     assert err.value.__cause__ is srv.timeout
     assert state["endpoints"].count("add_food") == 1
     assert srv.foods[RECIPE_ID]["name"] == "X"
+
+
+LEGACY_ID = 85102741
+
+
+def legacy_custom_food(*measures: dict) -> dict:
+    """400 kcal/100 g, with the "Atomic" serving older versions saved."""
+    return {
+        "id": LEGACY_ID,
+        "name": "ZZ custom",
+        "source": "Custom",
+        "owner": 42,
+        "measures": list(measures)
+        or [{"id": 7, "name": "serving", "value": 100, "amount": 1, "type": "Atomic"}],
+        "translations": [{"translationId": 94518891, "name": "ZZ custom"}],
+        "nutrients": [
+            {"id": 208, "amount": 400.0},
+            {"id": 203, "amount": 20.0},
+            {"id": 204, "amount": 10.0},
+            {"id": 205, "amount": 50.0},
+        ],
+    }
+
+
+def _m(mid, name, value, mtype):
+    return {"id": mid, "name": name, "value": value, "amount": 1, "type": mtype}
+
+
+UNWEIGHABLE = {
+    "atomic serving": legacy_custom_food(),
+    "atomic serving, weight g": legacy_custom_food(
+        _m(7, "serving", 100, "Atomic"), _m(8, "g", 1, "Weight")
+    ),
+    "weight serving, atomic g": legacy_custom_food(
+        _m(7, "serving", 100, "Weight"), _m(8, "g", 1, "Atomic")
+    ),
+}
+
+
+@pytest.mark.parametrize("food", UNWEIGHABLE.values(), ids=UNWEIGHABLE.keys())
+def test_create_recipe_refuses_unweighable_ingredient_before_saving(tmp_path, food):
+    srv = FakeFoodServer(ingredient_foods=[EGG, food])
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError) as err:
+        client.create_recipe("R", ingredients=[(1234, 50), (LEGACY_ID, 80)])
+
+    msg = str(err.value)
+    assert msg.startswith(
+        f"Food {LEGACY_ID} ('ZZ custom') can't be a recipe ingredient: its measures"
+    )
+    assert "leaves such a food's grams out of a recipe's batch weight" in msg
+    assert state["endpoints"] == ["get_foods"]  # nothing created
+    assert srv.foods == {}
+
+
+@pytest.mark.parametrize(
+    "food",
+    [
+        {**legacy_custom_food(_m(7, "tablet", 100, "Atomic")), "source": "CRDB"},
+        legacy_custom_food(_m(7, "serving", 0, "Atomic")),
+        legacy_custom_food(_m(7, "serving", 100, "Atomic"), _m(8, "x", None, "Atomic")),
+        legacy_custom_food(_m(7, "serving", 1, "Recipe"), _m(8, "g", 200, "Recipe")),
+    ],
+    ids=["database tablet", "weightless", "partly weightless", "serving-based"],
+)
+def test_other_unweighable_ingredients_are_refused(tmp_path, food):
+    srv = FakeFoodServer(ingredient_foods=[food])
+    client, _ = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError) as err:
+        client.create_recipe("R", ingredients=[(LEGACY_ID, 80)])
+
+    assert "can't be a recipe ingredient" in str(err.value)
+
+
+def test_update_recipe_refuses_unweighable_new_ingredient(tmp_path):
+    srv = FakeFoodServer(
+        foods=[recipe()], ingredient_foods=[BANANA, PB, legacy_custom_food()]
+    )
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError, match=r"can't be a recipe ingredient"):
+        client.update_recipe(RECIPE_ID, ingredients=[(LEGACY_ID, 152)])
+
+    assert endpoints(state) == ["get_food", "get_foods"]
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"name": "X"}, {"comments": "c"}, {"serving_grams": 50}]
+)
+def test_update_recipe_refuses_unweighable_kept_ingredient(tmp_path, kwargs):
+    food = recipe()
+    food["ingredients"][1]["foodId"] = LEGACY_ID
+    srv = FakeFoodServer(foods=[food], ingredient_foods=[BANANA, legacy_custom_food()])
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError, match=r"can't be a recipe ingredient"):
+        client.update_recipe(RECIPE_ID, **kwargs)
+
+    assert "add_food" not in endpoints(state)
+
+
+def test_repeated_ingredient_food_is_fetched_and_counted(tmp_path):
+    srv = FakeFoodServer(ingredient_foods=[EGG, WATER])
+    client, state = make_server_client(tmp_path, srv)
+
+    result = client.create_recipe(
+        "R", ingredients=[(1234, 50), (455493, 100), (1234, 50)]
+    )
+
+    assert result["total_grams"] == 200
+    assert state["payloads"][0]["ids"] == [1234, 455493, 1234]
+
+
+class ShortBatchServer(FakeFoodServer):
+    """Treats `uncounted` as unweighable, as the live server does."""
+
+    def __init__(self, *args, uncounted: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.uncounted = uncounted
+
+    def _save(self, food):
+        real = self.ingredient_foods[self.uncounted]
+        self.ingredient_foods[self.uncounted] = {
+            **real,
+            "measures": [{**m, "type": "Atomic"} for m in real["measures"]],
+        }
+        try:
+            return super()._save(food)
+        finally:
+            self.ingredient_foods[self.uncounted] = real
+
+
+@pytest.mark.parametrize(
+    ("ingredients", "stored"),
+    [([(1234, 80)], 0), ([(1234, 80), (455493, 50)], 50)],
+    ids=["lone", "beside a counted one"],
+)
+def test_create_recipe_raises_on_a_short_batch(tmp_path, ingredients, stored):
+    srv = ShortBatchServer(ingredient_foods=[EGG, WATER], uncounted=1234)
+    client, state = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError) as err:
+        client.create_recipe("R", ingredients=ingredients)
+
+    batch = sum(g for _, g in ingredients)
+    assert str(err.value) == (
+        f"The recipe exists (id 4242); don't re-create it. Recipe 4242 was "
+        f"saved, but Cronometer stored its batch weight as {stored} g instead "
+        f"of the ingredients' {batch} g, so its per-100 g nutrients are wrong"
+    )
+    assert state["endpoints"].count("add_food") == 1
+
+
+def test_update_recipe_raises_on_a_short_batch(tmp_path):
+    srv = ShortBatchServer(
+        foods=[recipe()], ingredient_foods=[BANANA, PB, EGG], uncounted=1234
+    )
+    client, _ = make_server_client(tmp_path, srv)
+
+    with pytest.raises(
+        CronometerError,
+        match=rf"^Recipe {RECIPE_ID} was saved; verify with get_food_details\. "
+        rf"Recipe {RECIPE_ID} was saved, but Cronometer stored its batch weight "
+        rf"as 120 g instead of the ingredients' 152 g",
+    ):
+        client.update_recipe(RECIPE_ID, ingredients=[(1234, 32), (450856, 120)])
+
+
+class ScaledNutrientServer(FakeFoodServer):
+    def __init__(self, *args, nutrient: int, factor: float, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.nutrient, self.factor = nutrient, factor
+
+    def _save(self, food):
+        resp = super()._save(food)
+        for n in self.foods[resp["id"]]["nutrients"]:
+            if n["id"] == self.nutrient:
+                n["amount"] *= self.factor
+        return resp
+
+
+@pytest.mark.parametrize("nutrient", [208, 203, 204, 205])
+def test_create_recipe_raises_on_wrong_derived_nutrients(tmp_path, nutrient):
+    weighed = legacy_custom_food(_m(7, "serving", 100, "Weight"))
+    srv = ScaledNutrientServer(
+        ingredient_foods=[weighed], nutrient=nutrient, factor=1.25
+    )
+    client, _ = make_server_client(tmp_path, srv)
+
+    with pytest.raises(
+        CronometerError,
+        match=rf"Recipe 4242 was saved, but Cronometer derived nutrient {nutrient} "
+        rf"as .* per 100 g, but its ingredients give",
+    ):
+        client.create_recipe("R", ingredients=[(LEGACY_ID, 100)])
+
+
+@pytest.mark.parametrize("nutrient", [208, 203])
+def test_update_recipe_raises_on_wrong_derived_nutrients(tmp_path, nutrient):
+    srv = ScaledNutrientServer(
+        foods=[recipe()],
+        ingredient_foods=[BANANA, PB],
+        nutrient=nutrient,
+        factor=0.5,
+    )
+    client, _ = make_server_client(tmp_path, srv)
+
+    with pytest.raises(CronometerError, match=rf"derived nutrient {nutrient} as"):
+        client.update_recipe(RECIPE_ID, name="X")
+
+
+@pytest.mark.parametrize("factor", [1 + 1e-9, 1 - 1e-9, 1 + 9e-5])
+def test_float_noise_in_derived_nutrients_passes(tmp_path, factor):
+    srv = ScaledNutrientServer(ingredient_foods=[EGG], nutrient=208, factor=factor)
+    client, _ = make_server_client(tmp_path, srv)
+
+    client.create_recipe("R", ingredients=[(1234, 100)])
+
+
+def test_nutrients_the_ingredients_lack_count_as_zero(tmp_path):
+    srv = FakeFoodServer(ingredient_foods=[EGG, WATER])
+    client, _ = make_server_client(tmp_path, srv)
+
+    result = client.create_recipe("R", ingredients=[(1234, 100), (455493, 100)])
+
+    stored = {n["id"]: n["amount"] for n in srv.foods[result["food_id"]]["nutrients"]}
+    assert stored[203] == pytest.approx(6.3)
+
+
+def test_several_full_recipe_measures_raise(tmp_path):
+    class TwoFullServer(FakeFoodServer):
+        def _save(self, food):
+            resp = super()._save(food)
+            stored = self.foods[resp["id"]]
+            full = next(m for m in stored["measures"] if m["name"] == "full recipe")
+            stored["measures"].append({**full, "id": 77})
+            return resp
+
+    client, _ = make_server_client(tmp_path, TwoFullServer(ingredient_foods=[EGG]))
+
+    with pytest.raises(
+        CronometerError,
+        match=r"reads back with 2 'full recipe' measures \[100.0, 100.0\]",
+    ):
+        client.create_recipe("R", ingredients=[(1234, 100)])

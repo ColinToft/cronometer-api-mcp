@@ -188,7 +188,7 @@ def test_update_custom_food_serving_grams_resets_quantity_and_type(tmp_path):
     assert measure["name"] == "serving"
     assert measure["value"] == 250
     assert measure["amount"] == 1.0
-    assert measure["type"] == "Atomic"
+    assert measure["type"] == "Weight"
 
 
 def test_update_custom_food_serving_quantity(tmp_path):
@@ -200,7 +200,7 @@ def test_update_custom_food_serving_quantity(tmp_path):
 
     client.update_custom_food(FOOD_ID, serving_quantity=1)
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["amount"], measure["value"], measure["type"]) == (1, 250, "Atomic")
+    assert (measure["amount"], measure["value"], measure["type"]) == (1, 250, "Weight")
 
     client.update_custom_food(FOOD_ID, serving_grams=30, serving_quantity=2)
     (measure,) = state["payloads"][3]["data"]["measures"]
@@ -597,12 +597,14 @@ SERVING_EDITS = [
 def test_update_custom_food_with_several_measures_requires_measure_id(
     tmp_path, default, kwargs
 ):
-    client, state = make_cold_client(tmp_path, [two_measure_food(default)])
+    food = two_measure_food(default)
+    food["measures"].append(_measure(902, "bowl", 300))
+    client, state = make_cold_client(tmp_path, [food])
 
     with pytest.raises(
         CronometerError,
-        match=r"has 2 measures \(id, name, grams\) \[\(900, 'serving', 50\), "
-        r"\(901, 'g', 1\)\]; pass measure_id",
+        match=r"has 3 measures \(id, name, grams\) \[\(900, 'serving', 50\), "
+        r"\(901, 'g', 1\), \(902, 'bowl', 300\)\]; pass measure_id",
     ):
         client.update_custom_food(FOOD_ID, **kwargs)
     assert len(state["payloads"]) == 1  # the read, no save
@@ -683,3 +685,62 @@ def test_update_custom_food_refuses_renaming_serving_to_weight_unit(tmp_path, un
     with pytest.raises(ValueError, match="is a weight unit"):
         client.update_custom_food(FOOD_ID, serving_name=unit)
     assert state["payloads"] == []
+
+
+def _measure(mid: int, name: str, value, mtype: str = "Weight") -> dict:
+    return {"id": mid, "name": name, "amount": 1, "value": value, "type": mtype}
+
+
+@pytest.mark.parametrize(
+    ("measures", "picked"),
+    [
+        ([_measure(900, "bar", 40), _measure(901, "g", 1)], 900),
+        ([_measure(901, "g", 1), _measure(900, "bar", 40)], 900),
+        (
+            [
+                _measure(901, "g", 1),
+                _measure(902, "oz", 28.35),
+                _measure(900, "cup", 240),
+            ],
+            900,
+        ),
+        ([_measure(901, " G ", 1)], 901),
+    ],
+)
+def test_serving_is_the_one_measure_besides_g_and_oz(tmp_path, measures, picked):
+    food = custom_food()
+    food["measures"] = measures
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, calories=100)
+
+    by_id = {m["id"]: m for m in measures}
+    grams = by_id[picked]["value"]
+    assert nutrients_by_id(state["payloads"][1])[208] == round(100 * 100 / grams, 2)
+
+
+@pytest.mark.parametrize(
+    "measures",
+    [
+        [_measure(901, "g", 1), _measure(902, "oz", 28.35)],
+        [_measure(900, "bar", 40), _measure(903, "cup", 240), _measure(901, "g", 1)],
+    ],
+)
+def test_serving_still_ambiguous_without_exactly_one_other(tmp_path, measures):
+    food = custom_food()
+    food["measures"] = measures
+    client, state = make_cold_client(tmp_path, [food])
+
+    with pytest.raises(CronometerError, match="pass measure_id"):
+        client.update_custom_food(FOOD_ID, calories=100)
+    assert len(state["payloads"]) == 1
+
+
+def test_update_leaves_measure_types_alone(tmp_path):
+    food = custom_food()
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, name="Renamed")
+
+    (measure,) = state["payloads"][1]["data"]["measures"]
+    assert measure["type"] == "Atomic"
