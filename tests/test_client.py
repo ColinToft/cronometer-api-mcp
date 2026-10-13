@@ -336,10 +336,8 @@ class FakeFoodServer:
     the first measure becomes the default (unless it's a lone "g", which
     keeps defaultMeasureId 0, as seen live), new measure names are re-parsed
     (server_reparse), and a recipe's "full recipe" weight and per-100g
-    nutrients are derived from its ingredients, leaving out the grams of an
-    ingredient with a non-"Weight" measure as the live server does
-    (derive_nutrients=False keeps whatever nutrients were sent, simulating a
-    save that derived nothing).
+    nutrients are derived from its ingredients (derive_nutrients=False keeps
+    whatever nutrients were sent, simulating a save that derived nothing).
     `save_responses` replaces the next add_food answers.
     """
 
@@ -406,8 +404,7 @@ class FakeFoodServer:
         if not food.get("defaultMeasureId") and not _only_gram(food):
             food["defaultMeasureId"] = food["measures"][0]["id"]
         if food.get("ingredients"):
-            # Live: an ingredient adds its grams only if all its food's
-            # measures are type "Weight", but always adds its nutrients.
+            # Live: unweighable ingredients add nutrients but not grams.
             batch = sum(
                 i["grams"]
                 for i in food["ingredients"]
@@ -1510,7 +1507,6 @@ def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
     assert state["endpoints"] == ["add_food", "get_food"]
     (measure,) = state["payloads"][0]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == (name, amount, 30)
-    # As the web client saves a weighed serving, so it counts in recipes.
     assert measure["type"] == "Weight"
     assert result == {"food_id": 4242, "measure_id": 9000}
 

@@ -25,7 +25,7 @@ from cronometer_api_mcp.client import CronometerError
 RECIPE_ID = 85008439
 OK = {"result": "SUCCESS", "messages": [], "id": RECIPE_ID}
 
-# Database foods' measures are all type "Weight" (seen live on these three).
+# Live, these three have only "Weight" measures.
 BANANA = {
     "id": 450856,
     "name": "Banana, Fresh",
@@ -183,7 +183,6 @@ def endpoints(state) -> list[str]:
     return state["endpoints"]
 
 
-# fetch, check the ingredients, save, read back
 SAVE = ["get_food", "get_foods", "add_food", "get_food"]
 
 
@@ -816,7 +815,6 @@ def test_save_failure_body_raises_after_one_retry(tmp_path):
     with pytest.raises(CronometerError, match="nope"):
         client.update_recipe(RECIPE_ID, name="X")
 
-    # retried once
     assert endpoints(state) == ["get_food", "get_foods", "add_food", "add_food"]
 
 
@@ -1800,16 +1798,11 @@ def test_update_recipe_timeout_on_read_back_says_it_was_saved(tmp_path):
     assert srv.foods[RECIPE_ID]["name"] == "X"
 
 
-# ---------------------------------------------------------------------------
-# Ingredients Cronometer can't weigh, and checking the derived batch
-# ---------------------------------------------------------------------------
-
 LEGACY_ID = 85102741
 
 
 def legacy_custom_food(*measures: dict) -> dict:
-    """A label-only custom food (400 kcal/100 g) as older versions of this
-    client saved it: an "Atomic" serving with a gram weight."""
+    """400 kcal/100 g, with the "Atomic" serving older versions saved."""
     return {
         "id": LEGACY_ID,
         "name": "ZZ custom",
@@ -1832,10 +1825,7 @@ def _m(mid, name, value, mtype):
 
 
 UNWEIGHABLE = {
-    # The live repro: a lone weighed Atomic serving.
     "atomic serving": legacy_custom_food(),
-    # Live: a "Weight" g beside an Atomic serving still isn't counted, nor is
-    # an Atomic g beside a "Weight" serving.
     "atomic serving, weight g": legacy_custom_food(
         _m(7, "serving", 100, "Atomic"), _m(8, "g", 1, "Weight")
     ),
@@ -1867,12 +1857,9 @@ def test_create_recipe_refuses_unweighable_ingredient_before_saving(tmp_path, fo
 @pytest.mark.parametrize(
     "food",
     [
-        # A database supplement whose "tablet" is a count, not a weight.
         {**legacy_custom_food(_m(7, "tablet", 100, "Atomic")), "source": "CRDB"},
-        # A custom count unit with no gram weight (the web form's "n/a").
         legacy_custom_food(_m(7, "serving", 0, "Atomic")),
         legacy_custom_food(_m(7, "serving", 100, "Atomic"), _m(8, "x", None, "Atomic")),
-        # A serving-based recipe's measures.
         legacy_custom_food(_m(7, "serving", 1, "Recipe"), _m(8, "g", 200, "Recipe")),
     ],
     ids=["database tablet", "weightless", "partly weightless", "serving-based"],
@@ -1905,9 +1892,6 @@ def test_update_recipe_refuses_unweighable_new_ingredient(tmp_path):
     "kwargs", [{"name": "X"}, {"comments": "c"}, {"serving_grams": 50}]
 )
 def test_update_recipe_refuses_unweighable_kept_ingredient(tmp_path, kwargs):
-    """Every save re-derives from the kept ingredients, so they're checked
-    too. (A recipe with one passes the batch check only if its weight came
-    out right, e.g. the food was re-typed after it was saved.)"""
     food = recipe()
     food["ingredients"][1]["foodId"] = LEGACY_ID
     srv = FakeFoodServer(foods=[food], ingredient_foods=[BANANA, legacy_custom_food()])
@@ -1920,8 +1904,6 @@ def test_update_recipe_refuses_unweighable_kept_ingredient(tmp_path, kwargs):
 
 
 def test_retyped_custom_food_works_as_an_ingredient(tmp_path):
-    """End to end: the legacy food is refused, update_custom_food re-types
-    its serving, and the recipe then derives the right batch."""
     legacy = legacy_custom_food()
     srv = FakeFoodServer(foods=[legacy], ingredient_foods=[legacy])
     client, _ = make_server_client(tmp_path, srv)
@@ -1953,8 +1935,7 @@ def test_repeated_ingredient_food_is_fetched_and_counted(tmp_path):
 
 
 class ShortBatchServer(FakeFoodServer):
-    """Stores the batch weight short while adding every ingredient's
-    nutrients, as the live server does for an ingredient it can't weigh."""
+    """Treats `uncounted` as unweighable, as the live server does."""
 
     def __init__(self, *args, uncounted: int, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1978,8 +1959,6 @@ class ShortBatchServer(FakeFoodServer):
     ids=["lone", "beside a counted one"],
 )
 def test_create_recipe_raises_on_a_short_batch(tmp_path, ingredients, stored):
-    """Should the server short a batch the pre-check didn't foresee, the
-    read-back catches it: never report success for a wrong batch."""
     srv = ShortBatchServer(ingredient_foods=[EGG, WATER], uncounted=1234)
     client, state = make_server_client(tmp_path, srv)
 
@@ -2011,8 +1990,6 @@ def test_update_recipe_raises_on_a_short_batch(tmp_path):
 
 
 class ScaledNutrientServer(FakeFoodServer):
-    """Stores the right batch weight but one nutrient scaled by `factor`."""
-
     def __init__(self, *args, nutrient: int, factor: float, **kwargs):
         super().__init__(*args, **kwargs)
         self.nutrient, self.factor = nutrient, factor
@@ -2057,7 +2034,6 @@ def test_update_recipe_raises_on_wrong_derived_nutrients(tmp_path, nutrient):
 
 @pytest.mark.parametrize("factor", [1 + 1e-9, 1 - 1e-9, 1 + 9e-5])
 def test_float_noise_in_derived_nutrients_passes(tmp_path, factor):
-    """Live derivations match to ~1e-13; only a real error should raise."""
     srv = ScaledNutrientServer(ingredient_foods=[EGG], nutrient=208, factor=factor)
     client, _ = make_server_client(tmp_path, srv)
 
@@ -2065,8 +2041,6 @@ def test_float_noise_in_derived_nutrients_passes(tmp_path, factor):
 
 
 def test_nutrients_the_ingredients_lack_count_as_zero(tmp_path):
-    """Water has no protein entry: the recipe's protein comes from the egg
-    alone, diluted by the water's grams."""
     srv = FakeFoodServer(ingredient_foods=[EGG, WATER])
     client, _ = make_server_client(tmp_path, srv)
 

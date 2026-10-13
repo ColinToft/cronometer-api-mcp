@@ -685,11 +685,6 @@ def test_update_custom_food_refuses_renaming_serving_to_weight_unit(tmp_path, un
     assert state["payloads"] == []
 
 
-# ---------------------------------------------------------------------------
-# Weighed "Atomic" measures are re-typed "Weight" on every save
-# ---------------------------------------------------------------------------
-
-
 def _measure(mid: int, name: str, value, mtype: str, amount: float = 1) -> dict:
     return {"id": mid, "name": name, "amount": amount, "value": value, "type": mtype}
 
@@ -697,7 +692,7 @@ def _measure(mid: int, name: str, value, mtype: str, amount: float = 1) -> dict:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"name": "Test Food"},  # the same name: the cheapest re-save
+        {"name": "Test Food"},
         {"name": "Renamed"},
         {"calories": 120},
         {"serving_quantity": 2},
@@ -705,8 +700,6 @@ def _measure(mid: int, name: str, value, mtype: str, amount: float = 1) -> dict:
     ],
 )
 def test_any_edit_retypes_weighed_atomic_measures(tmp_path, kwargs):
-    """Older versions saved servings as "Atomic", whose grams Cronometer
-    leaves out of a recipe's batch weight; every save re-types them."""
     food = custom_food()
     client, state = make_cold_client(tmp_path, [food, OK])
 
@@ -714,7 +707,7 @@ def test_any_edit_retypes_weighed_atomic_measures(tmp_path, kwargs):
 
     (measure,) = state["payloads"][1]["data"]["measures"]
     assert measure["type"] == "Weight"
-    assert measure["id"] == 900  # same measure, so diary entries keep it
+    assert measure["id"] == 900
 
 
 def test_retyping_covers_every_measure_and_keeps_the_rest(tmp_path):
@@ -740,8 +733,6 @@ def test_retyping_covers_every_measure_and_keeps_the_rest(tmp_path):
 
 @pytest.mark.parametrize("value", [0, None, -5, float("nan")])
 def test_weightless_atomic_measures_stay_atomic(tmp_path, value):
-    """A count unit with no real gram weight (the web form's "n/a") can't be
-    a weight, so it isn't re-typed."""
     food = custom_food()
     food["measures"].append(_measure(901, "tablet", value, "Atomic"))
     client, state = make_cold_client(tmp_path, [food, OK])

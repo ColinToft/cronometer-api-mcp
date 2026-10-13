@@ -86,11 +86,8 @@ _OZ_GRAMS = 28.3495231
 _FULL_RECIPE_MEASURE = "full recipe"
 _WEIGHT_UNIT_MEASURES = frozenset({"g", "oz"})
 _RECIPE_FIXED_MEASURES = _WEIGHT_UNIT_MEASURES | {_FULL_RECIPE_MEASURE}
-# Measure types. Cronometer's web client saves every serving that has a gram
-# weight as "Weight" (DB foods and recipes have only those). "Atomic" marks a
-# count unit (a supplement "tablet"); a food with any measure not of type
-# "Weight" adds its nutrients to a recipe but not its grams, so the batch
-# weight comes out short (all verified live; see _check_recipe_ingredient).
+# The web client saves a serving with a gram weight as "Weight"; "Atomic" is a
+# count unit (a supplement "tablet"). See _check_recipe_ingredient.
 _WEIGHED_MEASURE = "Weight"
 _ATOMIC_MEASURE = "Atomic"
 # Recipe serving weights are sent rounded to this many decimals, and read back
@@ -685,13 +682,9 @@ class CronometerClient:
         are normalized to per-100g, since Cronometer stores all nutrient data
         that way. A serving_name that leads with a quantity ("2 cookies") is
         refused. The saved serving is read back and re-sent once if the server
-        re-parsed its name (see _settle_serving). It is saved as a "Weight"
-        measure, as Cronometer's web client saves a serving with a gram
-        weight, so the food works as a recipe ingredient (see
-        _check_recipe_ingredient). The server then adds a "g" measure of its
-        own (unless the serving is "g"), so the food can be logged in grams;
-        update_custom_food's per-serving edits then need the returned
-        measure_id.
+        re-parsed its name (see _settle_serving). The serving is type
+        "Weight", so the food can be a recipe ingredient; the server then adds
+        a "g" measure (update_custom_food needs the returned measure_id).
 
         Args:
             extra_nutrients: Additional nutrients beyond the core macros above
@@ -911,12 +904,9 @@ class CronometerClient:
         Otherwise a food first saved as "400 g" keeps amount=400 and shows up
         as "400 <serving_name>" with no weight of its own.
 
-        Every save also re-types the food's weighed "Atomic" measures (older
-        versions of this client created servings that way) as "Weight", which
-        is what Cronometer's web client saves for a serving with a gram
-        weight. Diary math is unchanged (both count grams / 100), but only
-        then do the food's grams count toward a recipe's batch weight. Any
-        edit does it, e.g. passing the food's current name. serving_name must
+        Every save re-types weighed "Atomic" measures (older versions created
+        them) as "Weight" so the food can be a recipe ingredient; diary math
+        is unchanged. serving_name must
         not lead with a quantity ("2 cookies"); pass it as serving_quantity.
         A quantity set without serving_grams keeps the total weight,
         so the per-unit weight changes. (update_recipe keeps the quantity on a
@@ -1076,11 +1066,8 @@ class CronometerClient:
         Each ingredient references another food by ID plus a gram weight. The
         server derives the nutrients and the "full recipe" weight from the
         ingredients on every save (verified live with `nutrients: []`), so
-        none are sent. Both are read back and checked against the
-        ingredients, so a wrong batch raises instead of reporting success.
-        Ingredients whose food has a measure not of type "Weight" are refused
-        before saving, since the server leaves their grams out of the batch
-        (see _check_recipe_ingredient).
+        none are sent. Both are checked after saving (_check_derived_recipe),
+        and unweighable ingredients are refused first (_check_recipe_ingredient).
 
         This creates a *weight-based* recipe: measures are type "Weight", and
         the nutrients the server derives are stored per-100g.
@@ -1339,9 +1326,7 @@ class CronometerClient:
         The food id and measure ids survive (verified live). Only fields passed
         change. `ingredients` (create_recipe's tuple form) replaces the whole
         list; the server re-derives nutrients and the "full recipe" weight from
-        it, and both are checked after the save as in create_recipe. The
-        ingredients (new or kept) are refused before saving if their batch
-        weight can't be derived (see _check_recipe_ingredient).
+        it, checked as in create_recipe (kept ingredients too).
 
         The serving (the recipe's one non-fixed measure) is only touched when a
         serving field is passed, or when new ingredients change the batch
@@ -1436,7 +1421,6 @@ class CronometerClient:
                     serving["value"] = serving_grams
                 _check_serving_fits(serving["value"], batch_grams)
             if parsed is None:
-                # Kept ingredients are checked too: the save re-derives from them.
                 ingredient_foods = self._ingredient_foods(
                     [i["foodId"] for i in food["ingredients"]]
                 )
@@ -1497,8 +1481,7 @@ class CronometerClient:
         return result
 
     def _ingredient_foods(self, food_ids: list[int]) -> dict[int, dict]:
-        """The ingredients' foods by id, each checked by _check_recipe_ingredient
-        before anything is saved."""
+        """The ingredients' foods by id, each passing _check_recipe_ingredient."""
         foods = {f["id"]: f for f in self.get_foods(food_ids)}
         for food_id in dict.fromkeys(food_ids):
             _check_recipe_ingredient(foods[food_id])
@@ -2326,8 +2309,7 @@ def _check_serving_fits(serving_grams: float, batch_grams: float) -> None:
         )
 
 
-# The nutrients _check_derived_recipe recomputes from the ingredients. A
-# wrong batch weight scales every nutrient alike, so these suffice.
+# A wrong batch weight scales every nutrient alike, so these suffice.
 _RECIPE_CHECKED_NUTRIENTS = (
     NUTRIENT_IDS["energy"],
     NUTRIENT_IDS["protein"],
@@ -2337,15 +2319,9 @@ _RECIPE_CHECKED_NUTRIENTS = (
 
 
 def _check_derived_recipe(food: dict, ingredient_foods: dict[int, dict]) -> None:
-    """Check what the server derived for a just-saved recipe.
-
-    The client sends no nutrients, so energy must be present (a water-only
-    recipe reads back with energy 0, verified live). The "full recipe" weight
-    must be the ingredients' total, and energy and the macros must be the
-    ingredients' per-100 g amounts weighted by grams: six real recipes
-    matched that to float precision (checked live), so anything else is a
-    wrong batch rather than rounding.
-    """
+    """Energy must be present (water derives to 0), "full recipe" must be the
+    ingredient total, and the macros their gram-weighted per-100 g amounts
+    (six real recipes matched to float precision)."""
     label = f"Recipe {food['id']} was saved, but"
     stored = {n["id"]: n["amount"] for n in food.get("nutrients") or []}
     if NUTRIENT_IDS["energy"] not in stored:
@@ -2435,9 +2411,7 @@ def _serving_fraction(batch_grams: float, servings_per_batch: float) -> float:
 
 
 def _created_serving(food: dict, serving_name: str) -> dict:
-    """A just-created custom food's serving. Beside a "Weight" serving the
-    server adds a "g" measure of its own (seen live, unless the serving is
-    "g"), so the serving is the one measure that isn't that g."""
+    """The new food's serving: the server adds a "g" beside it (seen live)."""
     gram = _measure_key(serving_name) == "g"
     found = [m for m in food["measures"] if gram or _measure_key(m["name"]) != "g"]
     if len(found) != 1:
@@ -2500,16 +2474,9 @@ def _ingredient_rows(
 
 
 def _check_recipe_ingredient(food: dict) -> None:
-    """Refuse an ingredient whose grams Cronometer won't count in the batch.
-
-    The server adds every ingredient's nutrients to a recipe, but its grams
-    only when all of the food's measures are type "Weight". With any other
-    (an "Atomic" serving, even beside a "Weight" g; a serving-based recipe's
-    "Recipe" measures are refused untested) the stored "full recipe" weight
-    comes out short, 0 for a lone such ingredient, so every per-100 g
-    nutrient is inflated (verified live: 80 g of a 400 kcal/100 g custom food
-    with an "Atomic" serving stored a 0 g batch at 320 kcal/100 g).
-    """
+    """The server counts an ingredient's grams in the batch only if all its
+    measures are "Weight", but always adds its nutrients (verified live: 80 g
+    of a 400 kcal/100 g "Atomic" food gave a 0 g batch at 320 kcal/100 g)."""
     others = [m for m in food["measures"] if m["type"] != _WEIGHED_MEASURE]
     if not others:
         return
