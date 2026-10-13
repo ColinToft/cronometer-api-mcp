@@ -1332,10 +1332,10 @@ def test_create_custom_food_failure_after_save_names_the_id(
 @pytest.mark.parametrize(
     ("break_read_back", "match"),
     [
-        (lambda food: food.update(measures=[]), r"has 0 measures \[\]"),
+        (lambda food: food.update(measures=[]), "has no serving measure"),
         (
             lambda food: food["measures"].append({**food["measures"][0], "id": 1}),
-            r"has 2 measures \['serving', 'serving'\]",
+            r"has 2 measures \(id, name, grams\) \[\(9000, 'serving', 100",
         ),
     ],
 )
@@ -1417,7 +1417,10 @@ def test_update_custom_food_zero_default_with_two_measures_raises(tmp_path, kwar
     client, state, fake, _ = _create_gram_food(tmp_path)
     fake.foods[4242]["measures"].append(dict(_CUP))
 
-    with pytest.raises(CronometerError, match=r"has 2 measures \['g', 'cup'\]"):
+    with pytest.raises(
+        CronometerError,
+        match=r"has 2 measures .*\(9000, 'g', 1\), \(9001, 'cup', 240\)\]; pass measure_id",
+    ):
         client.update_custom_food(4242, **kwargs)
     assert state["endpoints"] == ["add_food", "get_food", "get_food"]
 
@@ -1464,3 +1467,17 @@ def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
     assert (out["food_id"], out["measure_id"]) == (4242, 9000)
     (measure,) = state["payloads"][0]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == ("cookies", 2, 30)
+
+
+def test_update_custom_food_tool_passes_measure_id(tmp_path, monkeypatch):
+    client, _, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"].append(dict(_CUP))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
+
+    refused = json.loads(mcp_server.update_custom_food(4242, calories=120))
+    assert refused["status"] == "error"
+    assert "pass measure_id" in refused["message"]
+
+    out = json.loads(mcp_server.update_custom_food(4242, calories=120, measure_id=9001))
+    assert out["status"] == "success"
+    assert {n["id"]: n["amount"] for n in fake.foods[4242]["nutrients"]}[208] == 50.0

@@ -84,7 +84,8 @@ _OZ_GRAMS = 28.3495231
 # Measures every recipe carries besides its serving. Nothing but the name
 # marks them (the API data has no other distinguishing field).
 _FULL_RECIPE_MEASURE = "full recipe"
-_RECIPE_FIXED_MEASURES = frozenset({"g", "oz", _FULL_RECIPE_MEASURE})
+_WEIGHT_UNIT_MEASURES = frozenset({"g", "oz"})
+_RECIPE_FIXED_MEASURES = _WEIGHT_UNIT_MEASURES | {_FULL_RECIPE_MEASURE}
 # Recipe serving weights are sent rounded to this many decimals, and read back
 # within _GRAMS_TOL: a batch that doesn't divide evenly (4561 g / 6) would
 # otherwise send an unbounded float.
@@ -769,7 +770,7 @@ class CronometerClient:
                 food = self.get_food(food_id)
                 _, serving = self._settle_serving(
                     food,
-                    _only_measure(food)["id"],
+                    _custom_food_serving(food, None)["id"],
                     serving_name,
                     serving_quantity,
                     serving_grams,
@@ -857,27 +858,6 @@ class CronometerClient:
             if t.get("name") == old_name:
                 t["name"] = name
 
-    @staticmethod
-    def _default_measure(food: dict) -> dict | None:
-        """The food's default measure, or None if it has no measures.
-
-        defaultMeasureId 0 means the server stored no explicit default (seen
-        live for a food whose only measure is "g"); the sole measure is then
-        the default, and with several it's ambiguous, so that's refused.
-        """
-        measures = food.get("measures") or []
-        if not measures:
-            return None
-        if food["defaultMeasureId"] == 0:
-            return _only_measure(food)
-        for m in measures:
-            if m["id"] == food["defaultMeasureId"]:
-                return m
-        raise CronometerError(
-            f"Food {food['id']}'s default measure {food['defaultMeasureId']} "
-            f"isn't one of its measures; fix it in the Cronometer app"
-        )
-
     def update_custom_food(
         self,
         food_id: int,
@@ -895,15 +875,27 @@ class CronometerClient:
         serving_name: str | None = None,
         serving_grams: float | None = None,
         serving_quantity: float | None = None,
+        measure_id: int | None = None,
     ) -> dict:
         """Edit a user-created custom food in place.
 
         Only the fields passed (not None) change; everything else is re-sent
         exactly as the server returned it. Nutrient amounts are per serving --
-        the default measure's weight, or serving_grams when given -- and are
+        the serving measure's weight, or serving_grams when given -- and are
         normalized to per-100g like create_custom_food. Changing serving_grams
         alone leaves the stored per-100g values as they are, so the food's
         per-serving numbers shift with the new weight.
+
+        The serving measure is the food's only measure, or measure_id when it
+        has several (see _custom_food_serving). Never defaultMeasureId: the
+        server moves that to whichever measure was logged last (verified
+        live), so trusting it edited a "g" measure after a gram-logged entry.
+        Diary entries logged by a measure keep its count, so resizing one
+        rescales every past entry logged by it (verified live: after "g" was
+        resized to a 250 g serving, a 100 g entry logged by it read back as
+        10,000 g). Hence
+        ambiguity is refused rather than guessed, and a "g" or "oz" measure
+        is never renamed or resized.
 
         A measure is `amount` units of `name` weighing `value` grams in total,
         and the app renders the serving as "<amount> <name>". Setting the
@@ -937,32 +929,40 @@ class CronometerClient:
                 _check_positive(label, v)
         _check_name(name)
 
+        per_serving = {
+            NUTRIENT_IDS["energy"]: calories,
+            NUTRIENT_IDS["protein"]: protein_g,
+            NUTRIENT_IDS["fat"]: fat_g,
+            NUTRIENT_IDS["carbs"]: carbs_g,
+            NUTRIENT_IDS["fiber"]: fiber_g,
+            NUTRIENT_IDS["sugar"]: sugar_g,
+            NUTRIENT_IDS["sodium"]: sodium_mg,
+            NUTRIENT_IDS["saturated_fat"]: saturated_fat_g,
+        }
+        per_serving = {nid: v for nid, v in per_serving.items() if v is not None}
+        per_serving.update(extra_nutrients or {})
+        edits_measure = any(
+            v is not None for v in (serving_name, serving_grams, serving_quantity)
+        )
+        edits_serving = bool(per_serving) or edits_measure
+        if measure_id is not None and not edits_serving:
+            raise ValueError(
+                "measure_id picks the serving that per-serving nutrients and "
+                "serving_* args apply to; pass it only with those"
+            )
+
         with self._food_lock(food_id):
             food = self._get_user_food(food_id, recipe=False)
 
             self._rename(food, name)
 
-            per_serving = {
-                NUTRIENT_IDS["energy"]: calories,
-                NUTRIENT_IDS["protein"]: protein_g,
-                NUTRIENT_IDS["fat"]: fat_g,
-                NUTRIENT_IDS["carbs"]: carbs_g,
-                NUTRIENT_IDS["fiber"]: fiber_g,
-                NUTRIENT_IDS["sugar"]: sugar_g,
-                NUTRIENT_IDS["sodium"]: sodium_mg,
-                NUTRIENT_IDS["saturated_fat"]: saturated_fat_g,
-            }
-            per_serving = {nid: v for nid, v in per_serving.items() if v is not None}
-            per_serving.update(extra_nutrients or {})
-
-            serving_args = (serving_name, serving_grams, serving_quantity)
-            edits_serving = per_serving or any(v is not None for v in serving_args)
-            measure = self._default_measure(food) if edits_serving else None
-            if edits_serving and measure is None:
+            measure = _custom_food_serving(food, measure_id) if edits_serving else None
+            if edits_measure and _is_weight_unit(measure["name"]):
                 raise CronometerError(
-                    f"Custom food {food_id} has no serving measure, so its "
-                    f"serving and per-serving nutrients can't be set; fix it in "
-                    f"the Cronometer app"
+                    f"Custom food {food_id}'s measure {measure['id']} is the "
+                    f"weight unit {measure['name']!r}; renaming or resizing it "
+                    f"would rescale every diary entry logged in it. Add a "
+                    f"separate serving in the Cronometer app instead"
                 )
             if serving_name is not None:
                 measure["name"] = serving_name
@@ -2261,6 +2261,10 @@ def _measure_key(name: str) -> str:
     return name.strip().casefold()
 
 
+def _is_weight_unit(name: str) -> bool:
+    return _measure_key(name) in _WEIGHT_UNIT_MEASURES
+
+
 def _is_fixed_recipe_measure(name: str) -> bool:
     return _measure_key(name) in _RECIPE_FIXED_MEASURES
 
@@ -2384,15 +2388,36 @@ def _serving_fraction(batch_grams: float, servings_per_batch: float) -> float:
     return round(batch_grams / servings_per_batch, _GRAMS_DECIMALS)
 
 
-def _only_measure(food: dict) -> dict:
-    """The food's one measure, refusing a food with none or several."""
+def _custom_food_serving(food: dict, measure_id: int | None) -> dict:
+    """The custom food measure that update_custom_food edits.
+
+    measure_id when given (it must be one of the food's measures); otherwise
+    the food's only measure. With several and no measure_id it's ambiguous,
+    so that's refused: defaultMeasureId can't break the tie, since the server
+    sets it to the last-logged measure.
+    """
     measures = food.get("measures") or []
-    if len(measures) != 1:
+    label = f"Custom food {food['id']}"
+    if not measures:
         raise CronometerError(
-            f"Food {food['id']} has {len(measures)} measures "
-            f"{[m.get('name') for m in measures]}, expected exactly one"
+            f"{label} has no serving measure, so its serving and per-serving "
+            f"nutrients can't be set; fix it in the Cronometer app"
         )
-    return measures[0]
+    listed = [(m["id"], m["name"], m["value"]) for m in measures]
+    if measure_id is None:
+        if len(measures) > 1:
+            raise CronometerError(
+                f"{label} has {len(measures)} measures (id, name, grams) "
+                f"{listed}; pass measure_id to say which serving to edit"
+            )
+        return measures[0]
+    for m in measures:
+        if m["id"] == measure_id:
+            return m
+    raise CronometerError(
+        f"{label} has no measure {measure_id}; its measures (id, name, grams) "
+        f"are {listed}"
+    )
 
 
 def _gram_measure_id(food: dict) -> int:
