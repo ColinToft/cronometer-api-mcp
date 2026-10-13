@@ -13,7 +13,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from .client import CronometerClient
+from .client import NUTRIENT_IDS, CronometerClient, _is_positive_number
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,8 +65,11 @@ mcp = MCPServer(
         "macro targets, biometrics, and fasting history from Cronometer. "
         "Use search_foods to find foods, get_food_details for nutrition info "
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
-        "review what was eaten. For relative-date questions, prefer relative inputs "
-        "(today, yesterday, N days ago) in get_food_log, get_daily_nutrition, and "
+        "review what was eaten. To review or edit a day, prefer the much smaller "
+        "get_food_log_compact, and add_food_entries / remove_food_entries to "
+        "change many entries across dates in one call. For relative-date "
+        "questions, prefer relative inputs (today, yesterday, N days ago) in "
+        "get_food_log, get_daily_nutrition, and "
         "get_nutrition_scores instead of calculating dates from conversation history. "
         "Use get_daily_nutrition(days=N) for calories or nutrients over the "
         "last N calendar days, including today; set date='yesterday' for complete "
@@ -121,25 +124,33 @@ def _resolve_read_days(d: str | None, days: int = 1) -> list[date]:
         ) from e
 
 
-def _read_days_response(results: list[dict]) -> str:
+def _read_days_response(results: list[dict], *, indent: int | None = 2) -> str:
     if len(results) == 1:
-        return _ok(results[0])
+        return _ok(results[0], indent=indent)
     return _ok(
         {
             "start_date": results[0]["date"],
             "end_date": results[-1]["date"],
             "days": results,
-        }
+        },
+        indent=indent,
     )
 
 
-def _ok(data: dict) -> str:
+def _ok(data: dict, *, indent: int | None = 2) -> str:
     """Wrap a successful response."""
-    return json.dumps({"status": "success", **data}, indent=2)
+    separators = None if indent else (",", ":")
+    return json.dumps(
+        {"status": "success", **data}, indent=indent, separators=separators
+    )
 
 
 def _err(e: Exception) -> str:
     """Wrap an error response with actionable messages."""
+    return json.dumps({"status": "error", "message": _err_message(e)})
+
+
+def _err_message(e: Exception) -> str:
     import httpx
 
     if isinstance(e, httpx.HTTPStatusError):
@@ -158,8 +169,7 @@ def _err(e: Exception) -> str:
         msg = "Could not connect to Cronometer. Check network connectivity."
     else:
         msg = f"{type(e).__name__}: {e}"
-
-    return json.dumps({"status": "error", "message": msg})
+    return msg
 
 
 # ------------------------------------------------------------------
@@ -191,6 +201,9 @@ def get_food_log(
     For serving-based recipes, serving_size.grams is null because the API
     uses reference-serving counts instead of gram weights. An invalid
     serving_size.quantity is reported as null.
+
+    The per-entry profiles make this very large (hundreds of thousands of
+    characters a day). To review or edit entries, prefer get_food_log_compact.
 
     Note: the per-entry "nutrients" are each food's individual contribution,
     which is distinct from the day-level nutrition_summary aggregate below.
@@ -236,23 +249,142 @@ def get_food_log(
 
 def _food_log_for_day(client: CronometerClient, day: date) -> dict:
     data = client.enrich_diary_servings(client.get_diary(day))
+    return {
+        "date": day.isoformat(),
+        "energy_summary": _energy_summary(data),
+        "nutrition_summary": client.get_consumed_nutrients(day),
+        "diary": data,
+    }
 
+
+def _energy_summary(data: dict) -> dict | None:
     summary = (data or {}).get("summary") or {}
     target = (summary.get("macros") or {}).get("energy")
     consumed = (summary.get("consumed") or {}).get("total")
-    energy_summary: dict | None = None
-    if target is not None and consumed is not None:
-        energy_summary = {
-            "total_target_kcal": target,
-            "consumed_kcal": consumed,
-            "remaining_kcal": round(target - consumed),
-        }
+    if target is None or consumed is None:
+        return None
+    return {
+        "total_target_kcal": target,
+        "consumed_kcal": consumed,
+        "remaining_kcal": round(target - consumed),
+    }
 
+
+_COMPACT_NUTRIENT_IDS = [
+    NUTRIENT_IDS[key]
+    for key in (
+        "energy",
+        "protein",
+        "fat",
+        "saturated_fat",
+        "carbs",
+        "fiber",
+        "sodium",
+        "calcium",
+    )
+]
+
+
+@mcp.tool(annotations=_READ_ONLY)
+def get_food_log_compact(
+    date: str | None = None,
+    days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
+    nutrients: list[str] | str | None = None,
+) -> str:
+    """Get diary entries in a small form, for reviewing or editing a day.
+
+    About 1-2% the size of get_food_log: each entry carries a few key
+    nutrients instead of the food's full profile. Each food entry has:
+
+      - serving_id: the entry's ID, for remove_food_entries
+      - meal: breakfast, lunch, dinner, snacks (Cronometer's default names,
+        even if renamed in the app), or "group N" for any further group
+      - food, food_id, measure_id: what add_food_entries takes to re-log it
+      - grams: the logged weight; null for a serving-based recipe, whose
+        diary amount is a count of reference servings (quantity holds it)
+      - measure and quantity: the amount in the logged measure, e.g.
+        3 "large"; both null if the food no longer has that measure, and
+        quantity null if the measure has no usable weight
+      - nutrients: {name: amount}; a nutrient the food has no data for is
+        left out
+
+    Per day it also returns energy_summary (as in get_food_log), totals (each
+    nutrient summed over the day's foods), units ({name: unit}), and
+    other_entries: non-food entries (exercise, biometrics) as the API sends
+    them.
+
+    Args:
+        date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
+              Defaults to today in the account timezone, resolved at call time.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date.
+        nutrients: Nutrient names to report instead of the default Energy,
+            Protein, Fat, Saturated, Carbs, Fiber, Sodium, Calcium. Matched
+            as in get_nutrient_sources, e.g. ["Energy", "Iron", "B12"].
+
+    One day returns the day's fields at the top level. Multiple days return
+    start_date, end_date, and a days list, oldest first.
+    """
+    try:
+        queries = None if nutrients is None else _nutrient_queries(nutrients)
+        resolved_days = _resolve_read_days(date, days)
+        client = _get_client()
+        defs = client.get_nutrient_definitions()
+        nutrient_ids = (
+            _COMPACT_NUTRIENT_IDS
+            if queries is None
+            else _match_nutrients(queries, defs)
+        )
+        return _read_days_response(
+            [_compact_day(client, day, defs, nutrient_ids) for day in resolved_days],
+            indent=None,
+        )
+    except Exception as e:
+        return _err(e)
+
+
+def _compact_day(
+    client: CronometerClient, day: date, defs: dict[int, dict], nutrient_ids: list[int]
+) -> dict:
+    data = client.enrich_diary_servings(client.get_diary(day))
+    names = {nid: defs[nid]["name"] for nid in nutrient_ids}
+    totals = dict.fromkeys(names.values(), 0.0)
+    entries = []
+    for entry in _food_servings(data):
+        amounts = {n["id"]: n["amount"] for n in entry["nutrients"]}
+        picked = {names[nid]: amounts[nid] for nid in nutrient_ids if nid in amounts}
+        for name, amount in picked.items():
+            totals[name] += amount
+        size = entry.get("serving_size")
+        # enrich_diary_servings falls back to the default measure when the
+        # logged one is gone; that measure would misdescribe the amount.
+        logged = size is not None and size["measure_id"] == entry["measureId"]
+        # enrich_diary_servings sets servings only when the measure has a
+        # weight, and gives a serving-based recipe's measure null grams.
+        counted = logged and "servings" in entry
+        recipe = counted and size["grams"] is None
+        quantity = size["quantity"] if counted else None
+        entries.append(
+            {
+                "serving_id": entry["servingId"],
+                "meal": _group_name(entry["order"] >> 16),
+                "food": entry["name"],
+                "food_id": entry["foodId"],
+                "measure_id": entry["measureId"],
+                "grams": None if recipe else entry["grams"],
+                "measure": size["unit"] if logged else None,
+                "quantity": None
+                if quantity is None
+                else round(quantity * entry["servings"], 2),
+                "nutrients": {k: round(v, 2) for k, v in picked.items()},
+            }
+        )
     return {
         "date": day.isoformat(),
-        "energy_summary": energy_summary,
-        "nutrition_summary": client.get_consumed_nutrients(day),
-        "diary": data,
+        "energy_summary": _energy_summary(data),
+        "totals": {k: round(v, 2) for k, v in totals.items()},
+        "units": {names[nid]: defs[nid]["unit"] for nid in nutrient_ids},
+        "entries": entries,
+        "other_entries": [e for e in data["diary"] if e["type"] != "Serving"],
     }
 
 
@@ -300,15 +432,7 @@ def get_nutrient_sources(
     try:
         if type(top_n) is not int or not 1 <= top_n <= 50:
             raise ValueError("top_n must be an integer between 1 and 50.")
-        if isinstance(nutrients, str):
-            nutrients = [nutrients]
-        if not nutrients:
-            raise ValueError("nutrients must name at least one nutrient.")
-        for query in nutrients:
-            if not isinstance(query, str) or not query.strip():
-                raise ValueError(
-                    f"Nutrient names must be non-empty strings; got {query!r}."
-                )
+        nutrients = _nutrient_queries(nutrients)
         resolved_days = _resolve_read_days(date, days)
         client = _get_client()
         defs = client.get_nutrient_definitions()
@@ -328,6 +452,50 @@ def get_nutrient_sources(
         return _ok({**dates, "nutrients": ranking})
     except Exception as e:
         return _err(e)
+
+
+def _nutrient_queries(nutrients: list[str] | str) -> list[str]:
+    if isinstance(nutrients, str):
+        nutrients = [nutrients]
+    if not nutrients:
+        raise ValueError("nutrients must name at least one nutrient.")
+    for query in nutrients:
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError(
+                f"Nutrient names must be non-empty strings; got {query!r}."
+            )
+    return nutrients
+
+
+def _group_name(group: int) -> str:
+    return _DIARY_GROUP_NAMES.get(group, f"group {group}")
+
+
+def _diary_entries(diary: dict) -> list[dict]:
+    """A get_diary response's entries; an empty day comes back as "diary": []."""
+    if not (isinstance(diary, dict) and isinstance(diary.get("diary"), list)):
+        shape = sorted(diary) if isinstance(diary, dict) else type(diary).__name__
+        raise TypeError(f"Unexpected get_diary response without a diary list: {shape}")
+    return diary["diary"]
+
+
+def _food_servings(*diaries: dict) -> list[dict]:
+    """The Serving entries of enriched diaries.
+
+    Raises if any lacks nutrient data (enrichment is best-effort and leaves an
+    entry bare when its food can't be fetched), since totals would silently
+    undercount.
+    """
+    entries = [_diary_entries(diary) for diary in diaries]
+    servings = [e for day in entries for e in day if e["type"] == "Serving"]
+    unresolved = sorted({e["foodId"] for e in servings if "nutrients" not in e})
+    if unresolved:
+        raise RuntimeError(
+            "Could not load nutrient data for food_ids "
+            + ", ".join(map(str, unresolved))
+            + "; totals would be incomplete. Try again."
+        )
+    return servings
 
 
 def _match_nutrients(queries: list[str], defs: dict[int, dict]) -> list[int]:
@@ -363,30 +531,8 @@ def _match_nutrients(queries: list[str], defs: dict[int, dict]) -> list[int]:
 def _rank_sources(
     diaries: list[dict], defs: dict[int, dict], nutrient_ids: list[int], top_n: int
 ) -> list[dict]:
-    """Aggregate enriched diaries into a per-nutrient ranking of foods.
-
-    Raises if any Serving entry lacks nutrient data (enrichment is best-effort
-    and leaves an entry bare when its food can't be fetched), since the totals
-    would silently undercount.
-    """
-    for diary in diaries:
-        # An empty day comes back as "diary": [], never a missing key.
-        if not (isinstance(diary, dict) and isinstance(diary.get("diary"), list)):
-            shape = sorted(diary) if isinstance(diary, dict) else type(diary).__name__
-            raise TypeError(
-                f"Unexpected get_diary response without a diary list: {shape}"
-            )
-    servings = [
-        e for diary in diaries for e in diary["diary"] if e["type"] == "Serving"
-    ]
-    unresolved = sorted({e["foodId"] for e in servings if "nutrients" not in e})
-    if unresolved:
-        raise RuntimeError(
-            "Could not load nutrient data for food_ids "
-            + ", ".join(map(str, unresolved))
-            + "; totals would be incomplete. Try again."
-        )
-
+    """Aggregate enriched diaries into a per-nutrient ranking of foods."""
+    servings = _food_servings(*diaries)
     results = []
     for nid in nutrient_ids:
         foods: dict[int, dict] = {}
@@ -442,7 +588,7 @@ def _rank_sources(
             "unit": defs[nid]["unit"],
             "total": round(total, 2),
             "by_diary_group": {
-                _DIARY_GROUP_NAMES.get(g, f"group {g}"): {
+                _group_name(g): {
                     "amount": round(a, 2),
                     "percent": pct(a),
                 }
@@ -523,32 +669,240 @@ def add_food_entry(
         return _err(e)
 
 
+@mcp.tool(annotations=_WRITE)
+def add_food_entries(entries: list[dict]) -> str:
+    """Add several food entries, across any dates, in one call.
+
+    Every item is checked before anything is logged: its fields, that the
+    food exists, and that measure_id is one of that food's measures. A bad
+    item fails the whole call with its index, and nothing is logged.
+
+    Items are then logged in order, one request each. The result lists the
+    added entries as {date, serving_id}, in input order, which
+    remove_food_entries takes as-is. If an item fails, the call stops there
+    and reports the entries already added (to keep or roll back), the
+    failed index, and the indices not attempted.
+
+    Args:
+        entries: Objects with keys food_id, measure_id (from get_food_details;
+            0 is refused), grams, date (YYYY-MM-DD), diary_group (breakfast,
+            lunch, dinner, or snacks; "auto" is refused), and optionally
+            translation_id (default 0). Unknown keys are refused.
+    """
+    try:
+        items = _parse_batch(entries, _parse_add_entry)
+        client = _get_client()
+        foods = {
+            f["id"]: f for f in client.get_foods(sorted({i["food_id"] for i in items}))
+        }
+        for index, item in enumerate(items):
+            food = foods.get(item["food_id"])
+            if food is None:
+                raise ValueError(
+                    f"entries[{index}]: food_id {item['food_id']} not found"
+                )
+            measures = {m["id"]: m["name"] for m in food["measures"]}
+            if item["measure_id"] not in measures:
+                raise ValueError(
+                    f"entries[{index}]: measure_id {item['measure_id']} is not a "
+                    f"measure of {food['name']!r} (food_id {food['id']}); its "
+                    f"measures are {measures}"
+                )
+    except Exception as e:
+        return _err(e)
+    added: list[dict] = []
+    for index, item in enumerate(items):
+        try:
+            result = client.add_serving(**item)
+            added.append({"date": item["day"].isoformat(), "serving_id": result["id"]})
+        except Exception as e:
+            return _batch_failure(
+                e, "added", added, [index], list(range(index + 1, len(items)))
+            )
+    return _ok({"added": added, "count": len(added)})
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+def remove_food_entries(entries: list[dict]) -> str:
+    """Remove food entries across any dates in one call.
+
+    Every entry is looked up before anything is removed (one get_diary per
+    date); an unknown or repeated serving_id fails the whole call with its
+    index, and nothing is removed. Each date's entries are then removed in
+    one request, dates in order of first appearance. If a date fails, the
+    call stops there and reports what was removed, the failed indices, and
+    the indices not attempted.
+
+    Args:
+        entries: Objects {"date": "YYYY-MM-DD", "serving_id": int}, as listed
+            by get_food_log_compact or returned by add_food_entries.
+    """
+    try:
+        items = _parse_batch(entries, _parse_remove_entry)
+        by_day: dict[date, list[tuple[int, int]]] = {}
+        first_index: dict[int, int] = {}
+        for index, (day, serving_id) in enumerate(items):
+            if serving_id in first_index:
+                raise ValueError(
+                    f"entries[{index}] repeats serving_id {serving_id} from "
+                    f"entries[{first_index[serving_id]}]"
+                )
+            first_index[serving_id] = index
+            by_day.setdefault(day, []).append((index, serving_id))
+        client = _get_client()
+        logged: dict[date, dict[int, dict]] = {}
+        for day in by_day:
+            diary = _diary_entries(client.get_diary(day))
+            logged[day] = {e["servingId"]: e for e in diary if e["type"] == "Serving"}
+        missing = [
+            f"entries[{index}] (serving_id {serving_id} on {day.isoformat()})"
+            for day, pairs in by_day.items()
+            for index, serving_id in pairs
+            if serving_id not in logged[day]
+        ]
+        if missing:
+            raise ValueError(
+                "Not in the diary, so nothing was removed: " + "; ".join(missing)
+            )
+    except Exception as e:
+        return _err(e)
+    removed: list[dict] = []
+    for n, (day, pairs) in enumerate(by_day.items()):
+        try:
+            client.delete_diary_entries([logged[day][sid] for _, sid in pairs])
+        except Exception as e:
+            later = [i for p in list(by_day.values())[n + 1 :] for i, _ in p]
+            return _batch_failure(e, "removed", removed, [i for i, _ in pairs], later)
+        removed.extend({"date": day.isoformat(), "serving_id": sid} for _, sid in pairs)
+    return _ok({"removed": removed, "count": len(removed)})
+
+
 @mcp.tool(annotations=_DESTRUCTIVE)
 def remove_food_entry(
     entry_ids: list[str],
     date: str | None = None,
 ) -> str:
-    """Remove one or more food entries from the Cronometer diary.
+    """Remove one or more food entries from one day of the Cronometer diary.
 
-    Use get_food_log to find entry IDs.
+    remove_food_entries does the same across several dates. An ID that isn't
+    in the day's diary fails the call, and nothing is removed.
 
     Args:
         entry_ids: List of serving/entry IDs to remove.
         date: Date the entries belong to as YYYY-MM-DD (defaults to today).
     """
     try:
-        client = _get_client()
-        day = _parse_date(date)
-        result = client.delete_entries(entry_ids, day)
-        return _ok(
-            {
-                "removed": result.get("removed", []),
-                "count": result.get("count", 0),
-                "date": date or str(date_module_today()),
-            }
-        )
+        day = date or date_module_today().isoformat()
+        for eid in entry_ids:
+            if not (isinstance(eid, str) and eid.isdigit()):
+                raise ValueError(f"entry_ids must be digit strings, got {eid!r}")
     except Exception as e:
         return _err(e)
+    return remove_food_entries(
+        [{"date": day, "serving_id": int(eid)} for eid in entry_ids]
+    )
+
+
+_ISO_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _parse_batch(entries: list[dict], parse) -> list:
+    """Parse every item up front, naming the first bad one by index."""
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("entries must be a non-empty list")
+    parsed = []
+    for index, item in enumerate(entries):
+        try:
+            parsed.append(parse(item))
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"entries[{index}]: {e}") from None
+    return parsed
+
+
+def _check_keys(item: object, required: set[str], optional: set[str]) -> dict:
+    if not isinstance(item, dict):
+        raise TypeError(f"expected an object, got {item!r}")
+    missing = required - set(item)
+    unknown = set(item) - required - optional
+    if missing or unknown:
+        raise ValueError(
+            f"missing keys {sorted(missing)}, unknown keys {sorted(unknown)}; "
+            f"expected {sorted(required)}"
+            + (f" and optionally {sorted(optional)}" if optional else "")
+        )
+    return item
+
+
+def _positive_int(item: dict, key: str) -> int:
+    value = item[key]
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{key} must be a positive integer, got {value!r}")
+    return value
+
+
+def _iso_day(value: object) -> date:
+    if not (isinstance(value, str) and _ISO_DATE.fullmatch(value)):
+        raise ValueError(f"date must be YYYY-MM-DD, got {value!r}")
+    return date.fromisoformat(value)
+
+
+def _parse_add_entry(item: object) -> dict:
+    item = _check_keys(
+        item,
+        {"food_id", "measure_id", "grams", "date", "diary_group"},
+        {"translation_id"},
+    )
+    grams = item["grams"]
+    if isinstance(grams, bool) or not _is_positive_number(grams):
+        raise ValueError(f"grams must be a positive number, got {grams!r}")
+    group = item["diary_group"]
+    if not (isinstance(group, str) and group.strip().lower() in _DIARY_GROUPS):
+        raise ValueError(
+            f"diary_group must be breakfast, lunch, dinner, or snacks, got {group!r}"
+        )
+    translation_id = item.get("translation_id", 0)
+    if type(translation_id) is not int or translation_id < 0:
+        raise ValueError(
+            f"translation_id must be a non-negative integer, got {translation_id!r}"
+        )
+    return {
+        "food_id": _positive_int(item, "food_id"),
+        "measure_id": _positive_int(item, "measure_id"),
+        "grams": grams,
+        "translation_id": translation_id,
+        "day": _iso_day(item["date"]),
+        "diary_group": _DIARY_GROUPS[group.strip().lower()],
+    }
+
+
+def _parse_remove_entry(item: object) -> tuple[date, int]:
+    item = _check_keys(item, {"date", "serving_id"}, set())
+    return _iso_day(item["date"]), _positive_int(item, "serving_id")
+
+
+def _batch_failure(
+    e: Exception,
+    done_key: str,
+    done: list[dict],
+    failed: list[int],
+    not_attempted: list[int],
+) -> str:
+    """A mid-batch failure: what was applied, what failed, what wasn't tried."""
+    return json.dumps(
+        {
+            "status": "error",
+            "message": (
+                f"entries{failed} failed: {_err_message(e)}. The call stopped; "
+                f"'{done_key}' lists what was applied before it. A request that "
+                f"failed in transit may still have been applied, so check with "
+                f"get_food_log_compact before retrying."
+            ),
+            done_key: done,
+            "failed": failed,
+            "not_attempted": not_attempted,
+        },
+        indent=2,
+    )
 
 
 # ------------------------------------------------------------------

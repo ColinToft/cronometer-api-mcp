@@ -67,6 +67,7 @@ NUTRIENT_IDS = {
     "fiber": 291,
     "sugar": 269,
     "sodium": 307,
+    "calcium": 301,
     "alcohol": 221,
     "net_carbs": -1205,
     "saturated_fat": 606,
@@ -1753,56 +1754,21 @@ class CronometerClient:
     # Diary: delete entries
     # ------------------------------------------------------------------
 
-    def delete_entries(self, entry_ids: list[str], day: date | None = None) -> dict:
-        """Remove diary entries by their serving IDs.
+    def delete_diary_entries(self, entries: list[dict]) -> None:
+        """Delete diary entries in one request.
 
-        Fetches the diary for the given day, matches entries by servingId,
-        and sends the full serving objects to the v3 DELETE endpoint.
-
-        Uses: DELETE /api/v3/user/{userId}/diary-entries
-
-        Args:
-            entry_ids: List of serving IDs to delete (as strings).
-            day: The day the entries belong to. Defaults to today.
-
-        Returns dict with removed IDs and count.
+        Uses: DELETE /api/v3/user/{userId}/diary-entries, which takes the full
+        entry objects as get_diary returns them, not just their servingIds.
+        Raises unless the server answers 204.
         """
-        # Fetch the diary to get full serving objects (required by v3 API)
-        diary_data = self.get_diary(day)
-        diary_entries = diary_data.get("diary", [])
-
-        id_set = {str(eid) for eid in entry_ids}
-        to_delete = []
-        for entry in diary_entries:
-            if str(entry.get("servingId")) in id_set:
-                to_delete.append(entry)
-
-        if not to_delete:
-            logger.warning(
-                "None of the requested entry IDs found in diary for %s",
-                self._format_day(day),
-            )
-            return {"removed": [], "count": 0}
-
         resp = self._request_v3(
-            "DELETE",
-            "/diary-entries",
-            json_body={"diaryEntries": to_delete},
+            "DELETE", "/diary-entries", json_body={"diaryEntries": entries}
         )
-
-        if resp.status_code == 204:
-            removed_ids = [str(e["servingId"]) for e in to_delete]
-            logger.info(
-                "Deleted %d entries for %s: %s",
-                len(removed_ids),
-                self._format_day(day),
-                removed_ids,
-            )
-            return {"removed": removed_ids, "count": len(removed_ids)}
-        else:
+        if resp.status_code != 204:
             raise CronometerError(
                 f"Delete failed with status {resp.status_code}: {resp.text[:300]}"
             )
+        logger.info("Deleted %d diary entries", len(entries))
 
     # ------------------------------------------------------------------
     # Diary: mark day complete

@@ -119,6 +119,7 @@ cached session, so it also overrides a stale cached timezone.
 | Tool | Description |
 |------|-------------|
 | `get_food_log` | Diary entries for a date, each enriched with food name, source, serving measure/count, and that food's per-entry nutrient contribution, plus an energy_summary (target/consumed/remaining kcal) and a nutrition_summary of consumed totals for every tracked nutrient |
+| `get_food_log_compact` | The same entries in about 2% of the size, for reviewing or editing a day: per entry its serving ID, meal, food and food ID, measure ID, grams, measure name and quantity, and a few key nutrients (or ones you name), plus the day's totals and energy_summary |
 | `get_daily_nutrition` | Consumed macro and micronutrient totals for every nutrient tracked in Cronometer |
 | `get_nutrient_sources` | Top foods behind one or more nutrient totals (e.g. "where did my sodium come from?"): total, split by diary group, and ranked sources with grams eaten, amount, and percent, aggregated across entries and days. A compact alternative to scanning `get_food_log` |
 | `get_nutrition_scores` | Category scores (Vitamins, Minerals, etc.) with per-nutrient consumed amounts and confidence levels |
@@ -135,7 +136,9 @@ cached session, so it also overrides a stale cached timezone.
 | Tool | Description |
 |------|-------------|
 | `add_food_entry` | Log a food serving to the diary |
-| `remove_food_entry` | Remove one or more diary entries |
+| `add_food_entries` | Log many servings across any dates in one call; every item is checked before anything is logged, and a mid-batch failure reports what was added so it can be rolled back |
+| `remove_food_entry` | Remove one or more diary entries from one date |
+| `remove_food_entries` | Remove entries across any dates in one call; every ID is looked up before anything is removed, and a mid-batch failure reports what was removed |
 | `add_custom_food` | Create a custom food with specified nutrition |
 | `update_custom_food` | Edit a custom food in place: name, nutrition, or serving size |
 | `delete_custom_food` | Retire a custom food or recipe so it leaves search (existing diary entries are kept) |
@@ -159,12 +162,12 @@ All date parameters use `YYYY-MM-DD` format and default to today when omitted.
 
 ### Relative dates and recent days
 
-`get_food_log`, `get_daily_nutrition`, `get_nutrient_sources`, and `get_nutrition_scores` also accept
+`get_food_log`, `get_food_log_compact`, `get_daily_nutrition`, `get_nutrient_sources`, and `get_nutrition_scores` also accept
 `"today"`, `"yesterday"`, and `"N days ago"` as their `date`. These are resolved
 at call time using your Cronometer account timezone, so Claude can pass relative
 inputs without relying on dates from earlier in a long conversation.
 
-`get_food_log`, `get_daily_nutrition`, and `get_nutrient_sources` accept `days` (1–31, default 1), counting
+`get_food_log`, `get_food_log_compact`, `get_daily_nutrition`, and `get_nutrient_sources` accept `days` (1–31, default 1), counting
 back from the inclusive end `date`:
 
 ```python

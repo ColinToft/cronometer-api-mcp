@@ -13,6 +13,7 @@ import threading
 
 EXPECTED_TOOLS = {
     "add_custom_food",
+    "add_food_entries",
     "add_food_entry",
     "add_recipe",
     "copy_day",
@@ -23,12 +24,14 @@ EXPECTED_TOOLS = {
     "get_fasting_stats",
     "get_food_details",
     "get_food_log",
+    "get_food_log_compact",
     "get_macro_targets",
     "get_nutrient_sources",
     "get_nutrition_scores",
     "import_recipe",
     "list_biometrics",
     "mark_day_complete",
+    "remove_food_entries",
     "remove_food_entry",
     "search_foods",
     "update_custom_food",
