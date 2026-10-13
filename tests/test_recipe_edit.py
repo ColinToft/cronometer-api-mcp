@@ -1265,23 +1265,50 @@ def test_get_food_details_plain_food_has_no_recipe_fields(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_create_recipe_read_back_without_default_measure_id(tmp_path):
+@pytest.mark.parametrize("default", [0, 9001, None])
+def test_create_recipe_finds_serving_whatever_the_default_measure(tmp_path, default):
+    """The serving is the one non-fixed measure; defaultMeasureId may be 0 or
+    point at "g" (9001), and the "g" measure must not be renamed."""
     fake = FakeFoodServer(ingredient_foods=[EGG])
-    client, _ = make_server_client(tmp_path, fake)
+    client, state = make_server_client(tmp_path, fake)
+    handle = fake.handle
+
+    def read_back(endpoint, body):
+        out = handle(endpoint, body)
+        if endpoint == "/api/v2/get_food":
+            out["defaultMeasureId"] = default
+        return out
+
+    fake.handle = read_back
+
+    result = client.create_recipe("R", ingredients=[(1234, 100)])
+
+    assert result["measure_id"] == 9000
+    assert state["endpoints"] == ["get_foods", "add_food", "get_food"]
+    assert [m["name"] for m in fake.foods[4242]["measures"]] == [
+        "Serving",
+        "g",
+        "oz",
+        "full recipe",
+    ]
+
+
+def test_create_recipe_read_back_with_two_servings(tmp_path):
+    fake = FakeFoodServer(ingredient_foods=[EGG])
+    client, state = make_server_client(tmp_path, fake)
     handle = fake.handle
 
     def broken(endpoint, body):
         out = handle(endpoint, body)
         if endpoint == "/api/v2/get_food":
-            out.pop("defaultMeasureId")
+            out["measures"].append({**out["measures"][0], "id": 1, "name": "bowl"})
         return out
 
     fake.handle = broken
 
-    with pytest.raises(
-        CronometerError, match=r"exists \(id 4242\).*'defaultMeasureId'"
-    ):
+    with pytest.raises(CronometerError, match=r"exists \(id 4242\).*several servings"):
         client.create_recipe("R", ingredients=[(1234, 100)])
+    assert state["endpoints"] == ["get_foods", "add_food", "get_food"]
 
 
 @pytest.mark.parametrize("serving_name", LEADING_QUANTITY_NAMES)
