@@ -188,7 +188,7 @@ def test_update_custom_food_serving_grams_resets_quantity_and_type(tmp_path):
     assert measure["name"] == "serving"
     assert measure["value"] == 250
     assert measure["amount"] == 1.0
-    assert measure["type"] == "Atomic"
+    assert measure["type"] == "Weight"
 
 
 def test_update_custom_food_serving_quantity(tmp_path):
@@ -200,7 +200,7 @@ def test_update_custom_food_serving_quantity(tmp_path):
 
     client.update_custom_food(FOOD_ID, serving_quantity=1)
     (measure,) = state["payloads"][1]["data"]["measures"]
-    assert (measure["amount"], measure["value"], measure["type"]) == (1, 250, "Atomic")
+    assert (measure["amount"], measure["value"], measure["type"]) == (1, 250, "Weight")
 
     client.update_custom_food(FOOD_ID, serving_grams=30, serving_quantity=2)
     (measure,) = state["payloads"][3]["data"]["measures"]
@@ -683,3 +683,70 @@ def test_update_custom_food_refuses_renaming_serving_to_weight_unit(tmp_path, un
     with pytest.raises(ValueError, match="is a weight unit"):
         client.update_custom_food(FOOD_ID, serving_name=unit)
     assert state["payloads"] == []
+
+
+# ---------------------------------------------------------------------------
+# Weighed "Atomic" measures are re-typed "Weight" on every save
+# ---------------------------------------------------------------------------
+
+
+def _measure(mid: int, name: str, value, mtype: str, amount: float = 1) -> dict:
+    return {"id": mid, "name": name, "amount": amount, "value": value, "type": mtype}
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"name": "Test Food"},  # the same name: the cheapest re-save
+        {"name": "Renamed"},
+        {"calories": 120},
+        {"serving_quantity": 2},
+        {"serving_grams": 40},
+    ],
+)
+def test_any_edit_retypes_weighed_atomic_measures(tmp_path, kwargs):
+    """Older versions saved servings as "Atomic", whose grams Cronometer
+    leaves out of a recipe's batch weight; every save re-types them."""
+    food = custom_food()
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, **kwargs)
+
+    (measure,) = state["payloads"][1]["data"]["measures"]
+    assert measure["type"] == "Weight"
+    assert measure["id"] == 900  # same measure, so diary entries keep it
+
+
+def test_retyping_covers_every_measure_and_keeps_the_rest(tmp_path):
+    food = custom_food()
+    food["measures"] = [
+        _measure(900, "serving", 50, "Atomic"),
+        _measure(901, "cookies", 30, "Atomic", amount=2),
+        _measure(902, "g", 1, "Atomic"),
+        _measure(903, "cup", 240, "Weight"),
+    ]
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, name="Renamed")
+
+    sent = state["payloads"][1]["data"]["measures"]
+    assert [(m["id"], m["amount"], m["value"], m["type"]) for m in sent] == [
+        (900, 1, 50, "Weight"),
+        (901, 2, 30, "Weight"),
+        (902, 1, 1, "Weight"),
+        (903, 1, 240, "Weight"),
+    ]
+
+
+@pytest.mark.parametrize("value", [0, None, -5, float("nan")])
+def test_weightless_atomic_measures_stay_atomic(tmp_path, value):
+    """A count unit with no real gram weight (the web form's "n/a") can't be
+    a weight, so it isn't re-typed."""
+    food = custom_food()
+    food["measures"].append(_measure(901, "tablet", value, "Atomic"))
+    client, state = make_cold_client(tmp_path, [food, OK])
+
+    client.update_custom_food(FOOD_ID, name="Renamed")
+
+    sent = state["payloads"][1]["data"]["measures"]
+    assert [(m["id"], m["type"]) for m in sent] == [(900, "Weight"), (901, "Atomic")]

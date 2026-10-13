@@ -336,8 +336,10 @@ class FakeFoodServer:
     the first measure becomes the default (unless it's a lone "g", which
     keeps defaultMeasureId 0, as seen live), new measure names are re-parsed
     (server_reparse), and a recipe's "full recipe" weight and per-100g
-    nutrients are derived from its ingredients (derive_nutrients=False keeps
-    whatever nutrients were sent, simulating a save that derived nothing).
+    nutrients are derived from its ingredients, leaving out the grams of an
+    ingredient with a non-"Weight" measure as the live server does
+    (derive_nutrients=False keeps whatever nutrients were sent, simulating a
+    save that derived nothing).
     `save_responses` replaces the next add_food answers.
     """
 
@@ -390,6 +392,12 @@ class FakeFoodServer:
             food["id"] = self.next_id
             self.next_id += 1
             food["source"] = "Custom"
+        new_food = food["id"] == self.next_id - 1 and food["id"] not in self.foods
+        if new_food and all(m["name"] != "g" for m in food["measures"]):
+            # Live: a new food without a "g" measure gets one.
+            food["measures"].append(
+                {"id": 0, "name": "g", "value": 1, "amount": 1, "type": "Weight"}
+            )
         for m in food["measures"]:
             if not m["id"]:
                 m["id"] = self.next_measure_id
@@ -398,7 +406,16 @@ class FakeFoodServer:
         if not food.get("defaultMeasureId") and not _only_gram(food):
             food["defaultMeasureId"] = food["measures"][0]["id"]
         if food.get("ingredients"):
-            batch = sum(i["grams"] for i in food["ingredients"])
+            # Live: an ingredient adds its grams only if all its food's
+            # measures are type "Weight", but always adds its nutrients.
+            batch = sum(
+                i["grams"]
+                for i in food["ingredients"]
+                if all(
+                    m["type"] == "Weight"
+                    for m in self.ingredient_foods[i["foodId"]]["measures"]
+                )
+            )
             for m in food["measures"]:
                 if m["name"] == "full recipe":
                     m["value"] = batch
@@ -409,8 +426,9 @@ class FakeFoodServer:
                         totals[n["id"]] = (
                             totals.get(n["id"], 0) + n["amount"] * i["grams"] / 100
                         )
+                # Live: a 0 g batch stores the totals as the per-100 g amounts.
                 food["nutrients"] = [
-                    {"id": nid, "amount": amount * 100 / batch}
+                    {"id": nid, "amount": amount * 100 / (batch or 100)}
                     for nid, amount in sorted(totals.items())
                 ]
         self.foods[food["id"]] = food
@@ -1492,6 +1510,8 @@ def test_create_custom_food_serving_measure(tmp_path, kwargs, name, amount):
     assert state["endpoints"] == ["add_food", "get_food"]
     (measure,) = state["payloads"][0]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == (name, amount, 30)
+    # As the web client saves a weighed serving, so it counts in recipes.
+    assert measure["type"] == "Weight"
     assert result == {"food_id": 4242, "measure_id": 9000}
 
 
@@ -1509,12 +1529,13 @@ def test_create_custom_food_resends_reparsed_serving(tmp_path, serving_name):
     assert state["endpoints"] == ["add_food", "get_food", "add_food", "get_food"]
     sent = state["payloads"][2]["data"]
     assert sent["nutrients"] == state["payloads"][0]["data"]["nutrients"]
-    (measure,) = server.foods[result["food_id"]]["measures"]
+    measure, gram = server.foods[result["food_id"]]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == (
         serving_name,
         1,
         250,
     )
+    assert (gram["name"], gram["value"], gram["type"]) == ("g", 1, "Weight")
 
 
 def test_create_custom_food_raises_with_id_when_serving_wont_settle(tmp_path):
@@ -1592,10 +1613,18 @@ def test_create_custom_food_failure_after_save_names_the_id(
 @pytest.mark.parametrize(
     ("break_read_back", "match"),
     [
-        (lambda food: food.update(measures=[]), "has no serving measure"),
+        (lambda food: food.update(measures=[]), r"read back with measures \[\];"),
         (
             lambda food: food["measures"].append({**food["measures"][0], "id": 1}),
-            r"has 2 measures \(id, name, grams\) \[\(9000, 'serving', 100",
+            (
+                r"read back with measures \[\(9000, 'serving', 100.0\), "
+                r"\(9001, 'g', 1\), \(1, 'serving', 100.0\)\]; expected its "
+                r"serving 'serving' and at most Cronometer's g"
+            ),
+        ),
+        (
+            lambda food: food["measures"].pop(0),
+            r"read back with measures \[\(9001, 'g', 1\)\]",
         ),
     ],
 )
