@@ -303,7 +303,8 @@ def get_food_log_compact(
       - grams: the logged weight; null for a serving-based recipe, whose
         diary amount is a count of reference servings (quantity holds it)
       - measure and quantity: the amount in the logged measure, e.g.
-        3 "large"; both null if the food no longer has that measure
+        3 "large"; both null if the food no longer has that measure, and
+        quantity null if the measure has no usable weight
       - nutrients: {name: amount}; a nutrient the food has no data for is
         left out
 
@@ -357,7 +358,11 @@ def _compact_day(
         # enrich_diary_servings falls back to the default measure when the
         # logged one is gone; that measure would misdescribe the amount.
         logged = size is not None and size["measure_id"] == entry["measureId"]
-        quantity = size["quantity"] if logged else None
+        # enrich_diary_servings sets servings only when the measure has a
+        # weight, and gives a serving-based recipe's measure null grams.
+        counted = logged and "servings" in entry
+        recipe = counted and size["grams"] is None
+        quantity = size["quantity"] if counted else None
         entries.append(
             {
                 "serving_id": entry["servingId"],
@@ -365,9 +370,7 @@ def _compact_day(
                 "food": entry["name"],
                 "food_id": entry["foodId"],
                 "measure_id": entry["measureId"],
-                "grams": None
-                if size is not None and size["grams"] is None
-                else entry["grams"],
+                "grams": None if recipe else entry["grams"],
                 "measure": size["unit"] if logged else None,
                 "quantity": None
                 if quantity is None
@@ -750,7 +753,7 @@ def remove_food_entries(entries: list[dict]) -> str:
         logged: dict[date, dict[int, dict]] = {}
         for day in by_day:
             diary = _diary_entries(client.get_diary(day))
-            logged[day] = {e["servingId"]: e for e in diary}
+            logged[day] = {e["servingId"]: e for e in diary if e["type"] == "Serving"}
         missing = [
             f"entries[{index}] (serving_id {serving_id} on {day.isoformat()})"
             for day, pairs in by_day.items()

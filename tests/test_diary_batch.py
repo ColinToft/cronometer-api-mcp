@@ -216,6 +216,21 @@ def test_add_needs_a_non_empty_list(fake, entries):
     assert f.state["endpoints"] == []
 
 
+def test_add_logs_a_gram_only_custom_food(fake):
+    f = fake()
+    f.ingredient_foods[4242] = {
+        "id": 4242,
+        "name": "Custom oats",
+        "defaultMeasureId": 0,
+        "measures": [{"id": 9000, "name": "g", "value": 1, "amount": 1}],
+    }
+
+    result = _add([_item(food_id=4242, measure_id=9000, grams=60)])
+
+    assert result["added"] == [{"date": D1, "serving_id": 5000}]
+    assert _logged(f, D1) == [(4242, 1, 60)]
+
+
 def test_add_refuses_an_unknown_food_before_logging(fake):
     f = fake()
     result = _add([_item(), _item(food_id=999)])
@@ -332,6 +347,23 @@ def test_remove_refuses_unknown_ids_before_deleting_anything(fake):
     assert f.state["endpoints"] == ["get_diary"] * 2
     assert f.deletes == []
     assert len(f.diary[D1]) == len(f.diary[D2]) == 1
+
+
+@pytest.mark.parametrize("with_id", [False, True])
+def test_remove_ignores_non_food_entries(fake, with_id):
+    f = fake()
+    (a,) = _seed(f, D1)
+    run = {"type": "Exercise", "name": "Running", "day": D1, "order": 1}
+    if with_id:
+        run["servingId"] = 77
+    f.diary[D1].append(run)
+
+    refused = _remove([{"date": D1, "serving_id": 77}])
+    result = _remove([a])
+
+    assert "entries[0] (serving_id 77 on 2027-03-15)" in refused["message"]
+    assert result == {"status": "success", "removed": [a], "count": 1}
+    assert f.diary[D1] == [run]
 
 
 def test_remove_refuses_a_repeated_id_before_any_request(fake):

@@ -204,6 +204,21 @@ def test_a_measure_the_food_no_longer_has_is_null_not_the_default(client):
     assert entry["nutrients"]["Energy"] == 143.0
 
 
+@pytest.mark.parametrize("value", [0, None, "50"])
+def test_a_measure_without_a_weight_has_no_quantity(client, value):
+    egg = {
+        **FOODS[1],
+        "id": 8,
+        "measures": [{"id": 80, "name": "large", "value": value}],
+    }
+    client.get_foods.side_effect = lambda ids: [egg]
+    client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 8, 80, 150, 1))
+
+    (entry,) = _call()["entries"]
+
+    assert (entry["grams"], entry["measure"], entry["quantity"]) == (150, "large", None)
+
+
 def test_food_without_measures_keeps_grams(client):
     bare = {**FOODS[1], "id": 9, "measures": []}
     client.get_foods.side_effect = lambda ids: [bare]
