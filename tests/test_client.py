@@ -1332,10 +1332,10 @@ def test_create_custom_food_failure_after_save_names_the_id(
 @pytest.mark.parametrize(
     ("break_read_back", "match"),
     [
-        (lambda food: food.update(measures=[]), r"has 0 measures \[\]"),
+        (lambda food: food.update(measures=[]), "has no serving measure"),
         (
             lambda food: food["measures"].append({**food["measures"][0], "id": 1}),
-            r"has 2 measures \['serving', 'serving'\]",
+            r"has 2 measures \(id, name, grams\) \[\(9000, 'serving', 100",
         ),
     ],
 )
@@ -1394,7 +1394,7 @@ def test_create_gram_custom_food_with_zero_default_measure(tmp_path):
     assert state["endpoints"] == ["add_food", "get_food"]
 
 
-def test_update_custom_food_with_zero_default_measure(tmp_path):
+def test_update_custom_food_gram_food_takes_per_gram_nutrients(tmp_path):
     client, state, fake, _ = _create_gram_food(tmp_path)
 
     client.update_custom_food(4242, name="Renamed", calories=3)
@@ -1413,17 +1413,20 @@ _CUP = {"id": 9001, "name": "cup", "value": 240, "amount": 1, "type": "Atomic"}
 
 
 @pytest.mark.parametrize("kwargs", [{"calories": 3}, {"serving_grams": 2}])
-def test_update_custom_food_zero_default_with_two_measures_raises(tmp_path, kwargs):
+def test_update_custom_food_two_measures_need_measure_id(tmp_path, kwargs):
     client, state, fake, _ = _create_gram_food(tmp_path)
     fake.foods[4242]["measures"].append(dict(_CUP))
 
-    with pytest.raises(CronometerError, match=r"has 2 measures \['g', 'cup'\]"):
+    with pytest.raises(
+        CronometerError,
+        match=r"has 2 measures .*\(9000, 'g', 1\), \(9001, 'cup', 240\)\]; pass measure_id",
+    ):
         client.update_custom_food(4242, **kwargs)
     assert state["endpoints"] == ["add_food", "get_food", "get_food"]
 
 
-def test_update_custom_food_zero_default_with_two_measures_still_renames(tmp_path):
-    """A rename never touches a measure, so an ambiguous default doesn't matter."""
+def test_update_custom_food_two_measures_still_rename(tmp_path):
+    """A rename never touches a measure, so an ambiguous serving doesn't matter."""
     client, state, fake, _ = _create_gram_food(tmp_path)
     fake.foods[4242]["measures"].append(dict(_CUP))
 
@@ -1433,7 +1436,7 @@ def test_update_custom_food_zero_default_with_two_measures_still_renames(tmp_pat
     assert fake.foods[4242]["name"] == "Renamed"
 
 
-def test_update_custom_food_zero_default_with_lone_non_gram_measure(tmp_path):
+def test_update_custom_food_lone_measure_is_the_serving(tmp_path):
     client, state, fake, _ = _create_gram_food(tmp_path)
     fake.foods[4242]["measures"] = [dict(_CUP)]
 
@@ -1464,3 +1467,17 @@ def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):
     assert (out["food_id"], out["measure_id"]) == (4242, 9000)
     (measure,) = state["payloads"][0]["data"]["measures"]
     assert (measure["name"], measure["amount"], measure["value"]) == ("cookies", 2, 30)
+
+
+def test_update_custom_food_tool_passes_measure_id(tmp_path, monkeypatch):
+    client, _, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"].append(dict(_CUP))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: client)
+
+    refused = json.loads(mcp_server.update_custom_food(4242, calories=120))
+    assert refused["status"] == "error"
+    assert "pass measure_id" in refused["message"]
+
+    out = json.loads(mcp_server.update_custom_food(4242, calories=120, measure_id=9001))
+    assert out["status"] == "success"
+    assert {n["id"]: n["amount"] for n in fake.foods[4242]["nutrients"]}[208] == 50.0

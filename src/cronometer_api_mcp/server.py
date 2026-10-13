@@ -1124,7 +1124,6 @@ def get_food_details(food_id: int) -> str:
         details = {
             "food_id": data.get("id"),
             "name": data.get("name"),
-            "default_measure_id": data.get("defaultMeasureId"),
             "measures": measures,
             "nutrients": data.get("nutrients", []),
         }
@@ -1239,6 +1238,7 @@ def update_custom_food(
     serving_name: str | None = None,
     serving_grams: float | None = None,
     serving_quantity: float | None = None,
+    measure_id: int | None = None,
 ) -> str:
     """Edit an existing custom food (one you created) in place.
 
@@ -1248,10 +1248,12 @@ def update_custom_food(
     past days, are recalculated with the new values. Recipes cannot be edited
     with this tool, even though they also show as source "Custom".
 
-    Nutrient amounts are per serving: the food's default serving, or
-    serving_grams when you pass it. To change the serving weight without
-    re-entering nutrition, pass serving_grams alone; the stored per-100g
-    values stay put, so the per-serving numbers scale with the new weight.
+    Nutrient amounts are per serving: the food's serving measure, or
+    serving_grams when you pass it; with several measures, measure_id picks
+    it. To change the serving weight without re-entering nutrition, pass
+    serving_grams alone; the stored per-100g values stay put, so the
+    per-serving numbers scale with the new weight. Diary entries logged by
+    that measure are rescaled with it, so "g" and "oz" can't be resized.
 
     Args:
         food_id: ID of the custom food to edit.
@@ -1267,18 +1269,20 @@ def update_custom_food(
         extra_nutrients: Additional nutrients keyed by Cronometer nutrient ID
             (from get_daily_nutrition) and valued per serving; must not reuse
             an ID the named args already cover.
-        serving_name: New name for the default serving. The app shows the
+        serving_name: New name for the serving; not "g" or "oz". The app shows the
             serving as "<quantity> <name>"; a leading number ("2 cookies")
             is refused: pass it as serving_quantity.
-        serving_grams: New total weight of the default serving in grams.
+        serving_grams: New total weight of the serving in grams.
             Also resets the quantity to serving_quantity (or 1).
-        serving_quantity: How many units make up the default serving
+        serving_quantity: How many units make up the serving
             (default 1 whenever serving_grams is passed). Without
             serving_grams the serving's total weight stays the same, so each
             unit gets lighter or heavier: changing "2 cookies = 30 g" to 3
             gives "3 cookies = 30 g". To keep the per-unit weight, also pass
             serving_grams (45 here). Check the result with get_food_details,
             which lists each measure's quantity.
+        measure_id: The serving to edit, from get_food_details; required
+            when the food has several measures.
     """
     try:
         client = _get_client()
@@ -1297,6 +1301,7 @@ def update_custom_food(
             serving_name=serving_name,
             serving_grams=serving_grams,
             serving_quantity=serving_quantity,
+            measure_id=measure_id,
         )
         return _ok({"food_id": result["food_id"], "name": result["name"]})
     except Exception as e:
