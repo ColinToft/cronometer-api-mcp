@@ -600,7 +600,8 @@ def add_food_entries(entries: list[dict]) -> str:
 
     Every item is checked before anything is logged: its fields, that the
     food exists, and that measure_id is one of that food's measures. A bad
-    item fails the whole call with its index, and nothing is logged.
+    item fails the whole call with its index (an unknown food_id with the
+    id, as Cronometer reports it), and nothing is logged.
 
     Items are then logged in order, one request each. The result lists the
     added entries as {date, serving_id}, in input order, which
@@ -621,11 +622,7 @@ def add_food_entries(entries: list[dict]) -> str:
             f["id"]: f for f in client.get_foods(sorted({i["food_id"] for i in items}))
         }
         for index, item in enumerate(items):
-            food = foods.get(item["food_id"])
-            if food is None:
-                raise ValueError(
-                    f"entries[{index}]: food_id {item['food_id']} not found"
-                )
+            food = foods[item["food_id"]]
             measures = {m["id"]: m["name"] for m in food["measures"]}
             if item["measure_id"] not in measures:
                 raise ValueError(

@@ -25,6 +25,36 @@ REAL_FAIL_BODY = {"result": "FAIL", "error": "Token Authorization failed"}
 # Synthetic/defensive variant. Never observed in real traffic, but the
 # client keeps handling it just in case some endpoint uses it.
 SYNTHETIC_FAILURE_BODY = {"result": "FAILURE", "error": "synthetic"}
+# Real auth failure for a bogus or null token, or a valid token sent with
+# another userId (all captured live, Oct 2026). Like REAL_FAIL_BODY, no
+# "messages".
+AUTH_FAILED_BODY = {"result": "FAIL", "error": "Authentication Failed"}
+# Real pre-dispatch failures (captured live): no "messages" either, so they
+# can't be told apart from auth failures and still re-authenticate.
+INVALID_COMMAND_BODY = {"result": "FAIL", "error": "Invalid Command"}
+BAD_PAYLOAD_BODY = {"result": "FAIL", "error": 'JSONObject["ids"] not found.'}
+# The account's pending sync messages, which the server attaches to every
+# response of a handler that ran, FAILs included (captured live).
+SYNC_MESSAGES = [
+    {"text": '{"id":85096127,"type":"ADD"}', "id": 20043751833, "type": "FOOD_CHANGED"}
+]
+
+
+def not_found_body(endpoint: str, food_id: int, messages=()) -> dict:
+    """The real FAIL body get_food / get_foods return for an unknown food id.
+
+    get_foods fails the whole call (naming only the first unknown id) rather
+    than leaving the food out. Captured live, Oct 2026.
+    """
+    where = {
+        "/api/v2/get_food": "doGetFood()",
+        "/api/v2/get_foods": "WebServiceV2 doGetFoods()",
+    }[endpoint]
+    return {
+        "result": "FAIL",
+        "messages": list(messages),
+        "error": f"{where}: Food {food_id} not found",
+    }
 
 
 class FakeResp:
@@ -129,6 +159,130 @@ def test_stale_cache_file_is_removed_on_failure(tmp_path):
     assert not session_path.exists()
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        REAL_FAIL_BODY,
+        AUTH_FAILED_BODY,
+        INVALID_COMMAND_BODY,
+        BAD_PAYLOAD_BODY,
+        SYNTHETIC_FAILURE_BODY,
+    ],
+    ids=["expired", "auth-failed", "invalid-command", "bad-payload", "failure"],
+)
+def test_fail_without_messages_reauthenticates(tmp_path, body):
+    """A FAIL without "messages" may be an auth failure, so it re-logs in."""
+    client, state = make_client(tmp_path, [body, {"result": "SUCCESS", "id": 3}])
+
+    assert client._request("/api/v2/get_foods", {}) == {"result": "SUCCESS", "id": 3}
+    assert (state["login"], state["post"]) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        not_found_body("/api/v2/get_foods", 999999999, SYNC_MESSAGES),
+        not_found_body("/api/v2/get_foods", 999999998),
+        not_found_body("/api/v2/get_food", 999999999),
+        {"result": "FAIL", "messages": [], "error": "Missing food id"},
+        {"result": "FAILURE", "messages": [], "error": "synthetic"},
+    ],
+    ids=["foods-with-sync", "foods-empty", "food", "missing-id", "failure"],
+)
+def test_fail_with_messages_raises_without_reauthenticating(tmp_path, body):
+    """A FAIL carrying "messages" came from a handler that ran for an
+    authenticated user: raise its error as-is, keep the session, send once."""
+    session_path = tmp_path / "session.json"
+    session_path.write_text('{"username": "", "user_id": 123, "token": "STALE"}')
+    client, state = make_client(tmp_path, [body, {"result": "SUCCESS"}])
+
+    with pytest.raises(CronometerError) as exc:
+        client._request("/api/v2/get_foods", {})
+
+    assert str(exc.value) == f"Cronometer API error: {body['error']}"
+    assert "FOOD_CHANGED" not in str(exc.value)
+    assert (state["login"], state["post"]) == (0, 1)
+    assert client._token == "STALE_TOKEN"
+    assert session_path.exists()
+
+
+def test_fail_with_messages_after_reauth_raises_its_error(tmp_path):
+    """Re-auth on an ambiguous FAIL, then a handler FAIL: raise that one."""
+    body = not_found_body("/api/v2/get_foods", 7, SYNC_MESSAGES)
+    client, state = make_client(tmp_path, [REAL_FAIL_BODY, body])
+
+    with pytest.raises(
+        CronometerError,
+        match=r"^Cronometer API error: WebServiceV2 doGetFoods\(\): Food 7 not found$",
+    ):
+        client._request("/api/v2/get_foods", {})
+
+    assert (state["login"], state["post"]) == (1, 2)
+
+
+GET_FOODS_FOODS = [{"id": 1, "name": "A"}, {"id": 2, "name": "B"}]
+
+
+@pytest.mark.parametrize(
+    "ids,unknown",
+    [
+        ([999], 999),
+        ([999, 1], 999),
+        ([1, 999], 999),
+        ([1, 2, 7, 8], 7),  # the API names only the first unknown id
+        ([8, 7], 8),
+    ],
+)
+def test_get_foods_unknown_id_fails_the_call_naming_it(tmp_path, ids, unknown):
+    client, state = make_server_client(
+        tmp_path, FakeFoodServer(ingredient_foods=GET_FOODS_FOODS)
+    )
+
+    with pytest.raises(CronometerError) as exc:
+        client.get_foods(ids)
+
+    assert str(exc.value) == (
+        f"Cronometer API error: WebServiceV2 doGetFoods(): Food {unknown} not found"
+    )
+    assert state["endpoints"] == ["get_foods"]
+
+
+@pytest.mark.parametrize("ids", [[1], [2, 1], [1, 2], [1, 1]])
+def test_get_foods_returns_every_requested_food(tmp_path, ids):
+    client, state = make_server_client(
+        tmp_path, FakeFoodServer(ingredient_foods=GET_FOODS_FOODS)
+    )
+
+    assert [f["id"] for f in client.get_foods(ids)] == ids
+    assert state["endpoints"] == ["get_foods"]
+
+
+def test_get_foods_empty_sends_nothing(tmp_path):
+    client, state = make_server_client(tmp_path, FakeFoodServer())
+
+    assert client.get_foods([]) == []
+    assert state["endpoints"] == []
+
+
+def test_get_foods_fails_fast_on_a_body_without_foods(tmp_path):
+    client, _ = make_client(tmp_path, [{"messages": []}])
+
+    with pytest.raises(KeyError, match="foods"):
+        client.get_foods([1])
+
+
+def test_get_food_unknown_id_raises_without_reauthenticating(tmp_path):
+    client, state = make_server_client(tmp_path, FakeFoodServer())
+
+    with pytest.raises(
+        CronometerError,
+        match=r"^Cronometer API error: doGetFood\(\): Food 5 not found$",
+    ):
+        client.get_food(5)
+
+    assert state["endpoints"] == ["get_food"]
+
+
 # ---------------------------------------------------------------------------
 # Cold-start auth ordering (issues #30 / #31)
 #
@@ -185,6 +339,9 @@ def server_reparse(name: str, amount: float) -> tuple[str, float]:
 class FakeFoodServer:
     """A stateful stand-in for add_food / get_food / get_foods.
 
+    An unknown id fails get_food / get_foods with the real not-found body
+    (see not_found_body), never a silently shorter list.
+
     add_food upserts like the real endpoint: new foods and measures get ids,
     the first measure becomes the default (unless it's a lone "g", which
     keeps defaultMeasureId 0, as seen live), new measure names are re-parsed
@@ -206,6 +363,8 @@ class FakeFoodServer:
 
     def handle(self, endpoint: str, body: dict) -> dict:
         if endpoint == "/api/v2/get_food":
+            if body["id"] not in self.foods:
+                return not_found_body(endpoint, body["id"])
             food = copy.deepcopy(self.foods[body["id"]])
             # A recipe without a stored "full recipe" reads back with a
             # virtual id-0 one (seen live).
@@ -223,12 +382,12 @@ class FakeFoodServer:
                 )
             return {**food, "messages": []}
         if endpoint == "/api/v2/get_foods":
+            for i in body["ids"]:
+                if i not in self.ingredient_foods:
+                    return not_found_body(endpoint, i, SYNC_MESSAGES)
             return {
-                "foods": [
-                    self.ingredient_foods[i]
-                    for i in body["ids"]
-                    if i in self.ingredient_foods
-                ]
+                "messages": [],
+                "foods": [self.ingredient_foods[i] for i in body["ids"]],
             }
         if endpoint == "/api/v2/add_food":
             if self.save_responses:
