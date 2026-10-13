@@ -406,7 +406,6 @@ def test_empty_day_has_zero_totals_and_no_entries(client):
     assert result["entries"] == [] and result["other_entries"] == []
     assert result["totals"] == dict.fromkeys(DEFAULT_NAMES, 0.0)
     assert list(result["units"]) == DEFAULT_NAMES
-    # An empty day needs no food lookups.
     client.get_foods.assert_not_called()
 
 

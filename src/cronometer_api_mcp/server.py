@@ -176,6 +176,19 @@ def _err_message(e: Exception) -> str:
 # ------------------------------------------------------------------
 
 
+def _energy_summary(data: dict) -> dict | None:
+    summary = (data or {}).get("summary") or {}
+    target = (summary.get("macros") or {}).get("energy")
+    consumed = (summary.get("consumed") or {}).get("total")
+    if target is None or consumed is None:
+        return None
+    return {
+        "total_target_kcal": target,
+        "consumed_kcal": consumed,
+        "remaining_kcal": round(target - consumed),
+    }
+
+
 _DEFAULT_LOG_NUTRIENT_IDS = [
     NUTRIENT_IDS[key]
     for key in (
@@ -304,19 +317,6 @@ def _food_log_day(
         "units": {names[nid]: defs[nid]["unit"] for nid in nutrient_ids},
         "entries": entries,
         "other_entries": [e for e in data["diary"] if e["type"] != "Serving"],
-    }
-
-
-def _energy_summary(data: dict) -> dict | None:
-    summary = (data or {}).get("summary") or {}
-    target = (summary.get("macros") or {}).get("energy")
-    consumed = (summary.get("consumed") or {}).get("total")
-    if target is None or consumed is None:
-        return None
-    return {
-        "total_target_kcal": target,
-        "consumed_kcal": consumed,
-        "remaining_kcal": round(target - consumed),
     }
 
 
