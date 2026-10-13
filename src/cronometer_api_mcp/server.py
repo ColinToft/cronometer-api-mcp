@@ -65,11 +65,10 @@ mcp = MCPServer(
         "macro targets, biometrics, and fasting history from Cronometer. "
         "Use search_foods to find foods, get_food_details for nutrition info "
         "and serving sizes, add_food_entry to log meals, and get_food_log to "
-        "review what was eaten. To review or edit a day, prefer the much smaller "
-        "get_food_log_compact, and add_food_entries / remove_food_entries to "
-        "change many entries across dates in one call. For relative-date "
-        "questions, prefer relative inputs (today, yesterday, N days ago) in "
-        "get_food_log, get_daily_nutrition, and "
+        "review or edit what was eaten, with add_food_entries / "
+        "remove_food_entries to change many entries across dates in one call. "
+        "For relative-date questions, prefer relative inputs (today, yesterday, "
+        "N days ago) in get_food_log, get_daily_nutrition, and "
         "get_nutrition_scores instead of calculating dates from conversation history. "
         "Use get_daily_nutrition(days=N) for calories or nutrients over the "
         "last N calendar days, including today; set date='yesterday' for complete "
@@ -177,100 +176,7 @@ def _err_message(e: Exception) -> str:
 # ------------------------------------------------------------------
 
 
-@mcp.tool(annotations=_READ_ONLY)
-def get_food_log(
-    date: str | None = None,
-    days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
-) -> str:
-    """Get diary entries for one day or the last N calendar days.
-
-    Prefer relative inputs for relative questions, rather than dates calculated
-    from conversation history. For calorie/nutrient totals without individual
-    entries, prefer get_daily_nutrition(days=N).
-
-    Returns every food entry logged for the day. Each "Serving" entry is
-    enriched (best-effort) with the food's name, source, serving_size, servings,
-    and that food's own nutrient profile scaled to the amount eaten. Non-food
-    entries (exercise, biometrics) carry their own name.
-
-    serving_size defines one portion: quantity units weighing grams in total.
-    servings is how many of those portions were consumed. For example,
-    serving_size={quantity: 2, unit: "cookies", grams: 30} with servings=1
-    means two cookies eaten; servings=0.5 means one cookie eaten. The size
-    uses the entry's selected measure, or the food's default as a fallback.
-    For serving-based recipes, serving_size.grams is null because the API
-    uses reference-serving counts instead of gram weights. An invalid
-    serving_size.quantity is reported as null.
-
-    The per-entry profiles make this very large (hundreds of thousands of
-    characters a day). To review or edit entries, prefer get_food_log_compact.
-
-    Note: the per-entry "nutrients" are each food's individual contribution,
-    which is distinct from the day-level nutrition_summary aggregate below.
-
-    Also returns a top-level energy_summary field with pre-computed
-    values most relevant to the user:
-
-      - total_target_kcal: daily calorie target dynamically adjusted
-        for expenditure and weight goal (equivalent to Cronometer's
-        "Total Target" in the Energy Summary screen)
-      - consumed_kcal: total calories consumed
-      - remaining_kcal: calories remaining to stay on target
-        (total_target_kcal - consumed_kcal). Always report this
-        when summarizing the user's day. Prefer this over manually
-        deriving values from the burn breakdown fields.
-
-    Also returns a nutrition_summary field with consumed totals for every
-    nutrient the user tracks in Cronometer (macros plus any tracked
-    micronutrients such as saturated fat, cholesterol, or omega-3/6):
-
-      - macros: flat macro totals (energy, protein, carbs, net_carbs, fat,
-        fiber, alcohol)
-      - nutrients: the full list of tracked nutrients with amounts and units
-
-    Args:
-        date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
-              Defaults to today in the account timezone, resolved at call time.
-        days: Number of calendar days, 1–31 (default 1). Includes the end date;
-              days=3 includes today, date='yesterday', days=3 excludes today.
-
-    One day returns the usual date/diary/summaries. Multiple days return
-    start_date, end_date, and a days list of those objects, oldest first.
-    """
-    try:
-        resolved_days = _resolve_read_days(date, days)
-        client = _get_client()
-        return _read_days_response(
-            [_food_log_for_day(client, day) for day in resolved_days]
-        )
-    except Exception as e:
-        return _err(e)
-
-
-def _food_log_for_day(client: CronometerClient, day: date) -> dict:
-    data = client.enrich_diary_servings(client.get_diary(day))
-    return {
-        "date": day.isoformat(),
-        "energy_summary": _energy_summary(data),
-        "nutrition_summary": client.get_consumed_nutrients(day),
-        "diary": data,
-    }
-
-
-def _energy_summary(data: dict) -> dict | None:
-    summary = (data or {}).get("summary") or {}
-    target = (summary.get("macros") or {}).get("energy")
-    consumed = (summary.get("consumed") or {}).get("total")
-    if target is None or consumed is None:
-        return None
-    return {
-        "total_target_kcal": target,
-        "consumed_kcal": consumed,
-        "remaining_kcal": round(target - consumed),
-    }
-
-
-_COMPACT_NUTRIENT_IDS = [
+_DEFAULT_LOG_NUTRIENT_IDS = [
     NUTRIENT_IDS[key]
     for key in (
         "energy",
@@ -286,15 +192,19 @@ _COMPACT_NUTRIENT_IDS = [
 
 
 @mcp.tool(annotations=_READ_ONLY)
-def get_food_log_compact(
+def get_food_log(
     date: str | None = None,
     days: Annotated[int, Field(ge=1, le=31, strict=True)] = 1,
     nutrients: list[str] | str | None = None,
 ) -> str:
-    """Get diary entries in a small form, for reviewing or editing a day.
+    """Get diary entries for one day or the last N calendar days.
 
-    About 1-2% the size of get_food_log: each entry carries a few key
-    nutrients instead of the food's full profile. Each food entry has:
+    Prefer relative inputs for relative questions, rather than dates calculated
+    from conversation history. For nutrient totals without individual entries,
+    prefer get_daily_nutrition(days=N); for the foods behind a total, use
+    get_nutrient_sources; for a food's full nutrient profile, get_food_details.
+
+    Each food entry has:
 
       - serving_id: the entry's ID, for remove_food_entries
       - meal: breakfast, lunch, dinner, snacks (Cronometer's default names,
@@ -305,18 +215,26 @@ def get_food_log_compact(
       - measure and quantity: the amount in the logged measure, e.g.
         3 "large"; both null if the food no longer has that measure, and
         quantity null if the measure has no usable weight
-      - nutrients: {name: amount}; a nutrient the food has no data for is
-        left out
+      - nutrients: {name: amount} for this entry; a nutrient the food has no
+        data for is left out
 
-    Per day it also returns energy_summary (as in get_food_log), totals (each
-    nutrient summed over the day's foods), units ({name: unit}), and
-    other_entries: non-food entries (exercise, biometrics) as the API sends
-    them.
+    Per day it also returns:
+
+      - complete: whether the day is marked complete (see mark_day_complete)
+      - energy_summary: total_target_kcal (the day's calorie target),
+        consumed_kcal, and remaining_kcal (target minus consumed). Always
+        report remaining_kcal when summarizing the user's day. Null if the
+        day has no target.
+      - totals: each reported nutrient summed over the day's foods
+      - units: {name: unit} for the reported nutrients
+      - other_entries: non-food entries (exercise, biometrics) as the API
+        sends them
 
     Args:
         date: Inclusive end date: YYYY-MM-DD, today, yesterday, or N days ago.
               Defaults to today in the account timezone, resolved at call time.
-        days: Number of calendar days, 1–31 (default 1). Includes the end date.
+        days: Number of calendar days, 1–31 (default 1). Includes the end date;
+              days=3 includes today, date='yesterday', days=3 excludes today.
         nutrients: Nutrient names to report instead of the default Energy,
             Protein, Fat, Saturated, Carbs, Fiber, Sodium, Calcium. Matched
             as in get_nutrient_sources, e.g. ["Energy", "Iron", "B12"].
@@ -330,19 +248,19 @@ def get_food_log_compact(
         client = _get_client()
         defs = client.get_nutrient_definitions()
         nutrient_ids = (
-            _COMPACT_NUTRIENT_IDS
+            _DEFAULT_LOG_NUTRIENT_IDS
             if queries is None
             else _match_nutrients(queries, defs)
         )
         return _read_days_response(
-            [_compact_day(client, day, defs, nutrient_ids) for day in resolved_days],
+            [_food_log_day(client, day, defs, nutrient_ids) for day in resolved_days],
             indent=None,
         )
     except Exception as e:
         return _err(e)
 
 
-def _compact_day(
+def _food_log_day(
     client: CronometerClient, day: date, defs: dict[int, dict], nutrient_ids: list[int]
 ) -> dict:
     data = client.enrich_diary_servings(client.get_diary(day))
@@ -380,11 +298,25 @@ def _compact_day(
         )
     return {
         "date": day.isoformat(),
+        "complete": data["info"]["complete"],
         "energy_summary": _energy_summary(data),
         "totals": {k: round(v, 2) for k, v in totals.items()},
         "units": {names[nid]: defs[nid]["unit"] for nid in nutrient_ids},
         "entries": entries,
         "other_entries": [e for e in data["diary"] if e["type"] != "Serving"],
+    }
+
+
+def _energy_summary(data: dict) -> dict | None:
+    summary = (data or {}).get("summary") or {}
+    target = (summary.get("macros") or {}).get("energy")
+    consumed = (summary.get("consumed") or {}).get("total")
+    if target is None or consumed is None:
+        return None
+    return {
+        "total_target_kcal": target,
+        "consumed_kcal": consumed,
+        "remaining_kcal": round(target - consumed),
     }
 
 
@@ -398,8 +330,8 @@ def get_nutrient_sources(
     """Rank the foods that supplied the most of one or more nutrients.
 
     Use this for "where did my sodium come from?" or "top protein sources this
-    week". It returns only the ranking, so it stays small; prefer it over
-    get_food_log, whose per-entry nutrient profiles are very large.
+    week". It returns only the ranking, so it stays small, and covers any
+    nutrient, not only the few get_food_log reports per entry.
 
     For each requested nutrient over the date range, returns the total, unit,
     the split by diary group (breakfast, lunch, dinner, snacks), and the top_n
@@ -735,7 +667,7 @@ def remove_food_entries(entries: list[dict]) -> str:
 
     Args:
         entries: Objects {"date": "YYYY-MM-DD", "serving_id": int}, as listed
-            by get_food_log_compact or returned by add_food_entries.
+            by get_food_log or returned by add_food_entries.
     """
     try:
         items = _parse_batch(entries, _parse_remove_entry)
@@ -895,7 +827,7 @@ def _batch_failure(
                 f"entries{failed} failed: {_err_message(e)}. The call stopped; "
                 f"'{done_key}' lists what was applied before it. A request that "
                 f"failed in transit may still have been applied, so check with "
-                f"get_food_log_compact before retrying."
+                f"get_food_log before retrying."
             ),
             done_key: done,
             "failed": failed,

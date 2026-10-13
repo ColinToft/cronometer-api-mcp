@@ -8,7 +8,13 @@ from unittest.mock import Mock, call
 import pytest
 
 from cronometer_api_mcp import server
-from cronometer_api_mcp.client import CronometerClient
+from cronometer_api_mcp.client import NUTRIENT_IDS, CronometerClient
+
+# The method each multi-day read tool calls once per day.
+DAY_METHOD = {
+    server.get_food_log: "get_diary",
+    server.get_daily_nutrition: "get_consumed_nutrients",
+}
 
 
 @pytest.fixture
@@ -17,7 +23,11 @@ def client(monkeypatch):
     client.today.return_value = date(2026, 1, 1)
     client.get_diary.return_value = {
         "summary": {"macros": {"energy": 2200}, "consumed": {"total": 1800}},
-        "entries": [],
+        "info": {"complete": False},
+        "diary": [],
+    }
+    client.get_nutrient_definitions.return_value = {
+        nid: {"name": key, "unit": "g"} for key, nid in NUTRIENT_IDS.items()
     }
     client.enrich_diary_servings.side_effect = lambda data: data
     client.get_consumed_nutrients.return_value = {
@@ -47,7 +57,14 @@ def client(monkeypatch):
         (
             server.get_food_log,
             "get_diary",
-            {"diary", "energy_summary", "nutrition_summary"},
+            {
+                "complete",
+                "energy_summary",
+                "totals",
+                "units",
+                "entries",
+                "other_entries",
+            },
         ),
         (
             server.get_daily_nutrition,
@@ -65,11 +82,8 @@ def test_single_day_compatibility(client, value, expected, tool, method, fields)
     assert set(result) == {"status", "date"} | fields
     getattr(client, method).assert_called_once_with(date.fromisoformat(expected))
     if tool is server.get_food_log:
-        client.get_consumed_nutrients.assert_called_once_with(
-            date.fromisoformat(expected)
-        )
+        client.get_consumed_nutrients.assert_not_called()
         assert result["energy_summary"]["remaining_kcal"] == 400
-        assert result["nutrition_summary"]["macros"]["energy"] == 1800
     if value == "2024-02-29":
         client.today.assert_not_called()
 
@@ -91,9 +105,8 @@ def test_multi_day_range(client, tool, end, expected):
     assert result["end_date"] == expected[-1]
     assert [day["date"] for day in result["days"]] == expected
     calls = [call(date.fromisoformat(day)) for day in expected]
-    assert client.get_consumed_nutrients.call_args_list == calls
+    assert getattr(client, DAY_METHOD[tool]).call_args_list == calls
     if tool is server.get_food_log:
-        assert client.get_diary.call_args_list == calls
         assert client.enrich_diary_servings.call_count == 3
 
 
@@ -108,7 +121,7 @@ def test_midnight_during_read_and_fresh_date_on_next_call(client, tool):
     assert second["end_date"] == "2026-01-02"
     assert client.today.call_count == 2
     expected = [date(2025, 12, 30), date(2025, 12, 31), date(2026, 1, 1)]
-    assert client.get_consumed_nutrients.call_args_list[:3] == [
+    assert getattr(client, DAY_METHOD[tool]).call_args_list[:3] == [
         call(d) for d in expected
     ]
 

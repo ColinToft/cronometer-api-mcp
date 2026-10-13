@@ -1,8 +1,7 @@
-"""get_food_log_compact: a small per-entry view of the diary.
+"""get_food_log: per-entry essentials of the diary, not full nutrient profiles.
 
 As in test_nutrient_sources, the client is a Mock whose enrich_diary_servings
-runs the real implementation, so the per-entry nutrient scaling is the one
-get_food_log uses.
+runs the real implementation, so the per-entry nutrient scaling is the real one.
 """
 
 import json
@@ -83,9 +82,10 @@ def _serving(serving_id, food_id, measure_id, grams, group):
     }
 
 
-def _diary(*entries, target=2800, consumed=1000.4):
+def _diary(*entries, target=2800, consumed=1000.4, complete=False):
     return {
         "summary": {"macros": {"energy": target}, "consumed": {"total": consumed}},
+        "info": {"complete": complete, "day": "2026-10-14"},
         "diary": list(entries),
     }
 
@@ -106,7 +106,7 @@ def client(monkeypatch):
 
 
 def _call(**kwargs):
-    return json.loads(server.get_food_log_compact(**kwargs))
+    return json.loads(server.get_food_log(**kwargs))
 
 
 def test_entries_carry_ids_measure_and_default_nutrients(client):
@@ -120,6 +120,7 @@ def test_entries_carry_ids_measure_and_default_nutrients(client):
     assert result == {
         "status": "success",
         "date": "2026-10-14",
+        "complete": False,
         "energy_summary": {
             "total_target_kcal": 2800,
             "consumed_kcal": 1000.4,
@@ -169,12 +170,13 @@ def test_entries_carry_ids_measure_and_default_nutrients(client):
     }
     assert client.get_diary.call_args_list == [call(date(2026, 10, 14))]
     client.get_consumed_nutrients.assert_not_called()
+    client.get_nutrition_scores.assert_not_called()
 
 
 def test_output_is_one_line_of_minified_json(client):
     client.diaries[date(2026, 10, 14)] = _diary(_serving(501, 1, 10, 150, 1))
 
-    raw = server.get_food_log_compact()
+    raw = server.get_food_log()
 
     assert "\n" not in raw
     assert ", " not in raw.replace("Egg, ", "")
@@ -260,7 +262,7 @@ def test_non_food_entries_pass_through(client):
 
 
 def test_energy_summary_is_null_without_a_target(client):
-    client.diaries[date(2026, 10, 14)] = {"summary": {}, "diary": []}
+    client.diaries[date(2026, 10, 14)] = {**_diary(), "summary": {}}
 
     result = _call()
 
@@ -346,3 +348,96 @@ def test_unknown_diary_shape_fails(client):
 def test_invalid_date_does_not_fetch(client):
     assert _call(date="2026-13-01")["status"] == "error"
     client.get_diary.assert_not_called()
+
+
+ENTRY_KEYS = {
+    "serving_id",
+    "meal",
+    "food",
+    "food_id",
+    "measure_id",
+    "grams",
+    "measure",
+    "quantity",
+    "nutrients",
+}
+DAY_KEYS = {
+    "date",
+    "complete",
+    "energy_summary",
+    "totals",
+    "units",
+    "entries",
+    "other_entries",
+}
+
+
+def test_entries_carry_no_full_profile_or_raw_fields(client):
+    client.diaries[date(2026, 10, 14)] = _diary(
+        _serving(1, 1, 10, 50, 1), _serving(2, 2, 20, 1, 3), _serving(3, 3, 30, 5, 4)
+    )
+
+    result = _call()
+
+    assert set(result) == {"status"} | DAY_KEYS
+    assert [set(e) for e in result["entries"]] == [ENTRY_KEYS] * 3
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_complete_reports_the_days_flag(client, complete):
+    client.diaries[date(2026, 10, 14)] = _diary(complete=complete)
+
+    assert _call()["complete"] is complete
+
+
+def test_a_diary_without_info_fails_rather_than_guessing_complete(client):
+    client.get_diary.side_effect = None
+    client.get_diary.return_value = {"summary": {}, "diary": []}
+
+    result = _call()
+
+    assert result["status"] == "error"
+    assert "KeyError" in result["message"] and "info" in result["message"]
+
+
+def test_empty_day_has_zero_totals_and_no_entries(client):
+    result = _call()
+
+    assert result["entries"] == [] and result["other_entries"] == []
+    assert result["totals"] == dict.fromkeys(DEFAULT_NAMES, 0.0)
+    assert list(result["units"]) == DEFAULT_NAMES
+    # An empty day needs no food lookups.
+    client.get_foods.assert_not_called()
+
+
+def test_totals_are_the_unrounded_sum_of_entries(client):
+    # Seven 7 g eggs: each entry rounds to 10.01 kcal, the true total is 70.07.
+    client.diaries[date(2026, 10, 14)] = _diary(
+        *(_serving(i, 1, 11, 7, 1 + i % 4) for i in range(7))
+    )
+
+    result = _call(nutrients=["Energy", "Sodium", "Iron"])
+
+    assert [e["nutrients"]["Energy"] for e in result["entries"]] == [10.01] * 7
+    assert result["totals"] == {"Energy": 70.07, "Sodium": 69.58, "Iron": 0.86}
+
+
+def test_multiple_days_keep_each_days_shape_and_skip_empty_lookups(client):
+    run = {"type": "Exercise", "name": "Running", "order": 1, "servingId": 9}
+    client.diaries[date(2026, 10, 12)] = _diary(run, complete=True)
+    client.diaries[date(2026, 10, 14)] = _diary(_serving(2, 2, 20, 2, 3))
+
+    result = _call(days=3, nutrients="Protein")
+
+    assert set(result) == {"status", "start_date", "end_date", "days"}
+    days = result["days"]
+    assert [d["date"] for d in days] == ["2026-10-12", "2026-10-13", "2026-10-14"]
+    assert [set(d) for d in days] == [DAY_KEYS] * 3
+    assert [d["complete"] for d in days] == [True, False, False]
+    assert [d["other_entries"] for d in days] == [[run], [], []]
+    assert [d["totals"] for d in days] == [
+        {"Protein": 0.0},
+        {"Protein": 0.0},
+        {"Protein": 60.0},
+    ]
+    assert client.get_foods.call_args_list == [call([2])]
