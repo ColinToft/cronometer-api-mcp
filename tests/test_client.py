@@ -186,7 +186,8 @@ class FakeFoodServer:
     """A stateful stand-in for add_food / get_food / get_foods.
 
     add_food upserts like the real endpoint: new foods and measures get ids,
-    the first measure becomes the default, new measure names are re-parsed
+    the first measure becomes the default (unless it's a lone "g", which
+    keeps defaultMeasureId 0, as seen live), new measure names are re-parsed
     (server_reparse), and a recipe's "full recipe" weight and per-100g
     nutrients are derived from its ingredients (derive_nutrients=False keeps
     whatever nutrients were sent, simulating a save that derived nothing).
@@ -245,7 +246,7 @@ class FakeFoodServer:
                 m["id"] = self.next_measure_id
                 self.next_measure_id += 1
                 m["name"], m["amount"] = server_reparse(m["name"], m["amount"])
-        if not food.get("defaultMeasureId"):
+        if not food.get("defaultMeasureId") and not _only_gram(food):
             food["defaultMeasureId"] = food["measures"][0]["id"]
         if food.get("ingredients"):
             batch = sum(i["grams"] for i in food["ingredients"])
@@ -265,6 +266,10 @@ class FakeFoodServer:
                 ]
         self.foods[food["id"]] = food
         return {"result": "SUCCESS", "messages": [], "id": food["id"]}
+
+
+def _only_gram(food: dict) -> bool:
+    return [(m["name"], m["value"]) for m in food["measures"]] == [("g", 1)]
 
 
 def make_server_client(tmp_path: Path, server: FakeFoodServer):
@@ -1327,11 +1332,14 @@ def test_create_custom_food_failure_after_save_names_the_id(
 @pytest.mark.parametrize(
     ("break_read_back", "match"),
     [
-        (lambda food: food.update(measures=[]), "has no measure 9000"),
-        (lambda food: food.pop("defaultMeasureId"), "'defaultMeasureId'"),
+        (lambda food: food.update(measures=[]), r"has 0 measures \[\]"),
+        (
+            lambda food: food["measures"].append({**food["measures"][0], "id": 1}),
+            r"has 2 measures \['serving', 'serving'\]",
+        ),
     ],
 )
-def test_create_custom_food_read_back_without_default_measure(
+def test_create_custom_food_read_back_without_one_measure(
     tmp_path, break_read_back, match
 ):
     fake = FakeFoodServer()
@@ -1349,6 +1357,90 @@ def test_create_custom_food_read_back_without_default_measure(
     with pytest.raises(CronometerError, match=rf"exists \(id 4242\).*{match}"):
         _create(client)
     assert state["endpoints"] == ["add_food", "get_food"]
+
+
+@pytest.mark.parametrize("default", [0, 9000, None])
+def test_create_custom_food_ignores_default_measure_id(tmp_path, default):
+    """The one measure sent is the serving, whatever defaultMeasureId says."""
+    fake = FakeFoodServer()
+    client, state = make_server_client(tmp_path, fake)
+    handle = fake.handle
+
+    def read_back(endpoint, body):
+        out = handle(endpoint, body)
+        if endpoint == "/api/v2/get_food":
+            out["defaultMeasureId"] = default
+        return out
+
+    fake.handle = read_back
+
+    assert _create(client)["measure_id"] == 9000
+    assert state["endpoints"] == ["add_food", "get_food"]
+
+
+def _create_gram_food(tmp_path):
+    fake = FakeFoodServer()
+    client, state = make_server_client(tmp_path, fake)
+    result = _create(client, serving_name="g", serving_grams=1)
+    return client, state, fake, result
+
+
+def test_create_gram_custom_food_with_zero_default_measure(tmp_path):
+    """Live, a lone "g" serving is stored with defaultMeasureId 0."""
+    _, state, fake, result = _create_gram_food(tmp_path)
+
+    assert fake.foods[4242]["defaultMeasureId"] == 0
+    assert result == {"food_id": 4242, "measure_id": 9000}
+    assert state["endpoints"] == ["add_food", "get_food"]
+
+
+def test_update_custom_food_with_zero_default_measure(tmp_path):
+    client, state, fake, _ = _create_gram_food(tmp_path)
+
+    client.update_custom_food(4242, name="Renamed", calories=3)
+
+    assert state["endpoints"] == ["add_food", "get_food", "get_food", "add_food"]
+    food = fake.foods[4242]
+    assert food["name"] == "Renamed"
+    assert {n["id"]: n["amount"] for n in food["nutrients"]}[208] == 300.0
+    assert food["defaultMeasureId"] == 0
+    assert [(m["id"], m["name"], m["value"]) for m in food["measures"]] == [
+        (9000, "g", 1)
+    ]
+
+
+_CUP = {"id": 9001, "name": "cup", "value": 240, "amount": 1, "type": "Atomic"}
+
+
+@pytest.mark.parametrize("kwargs", [{"calories": 3}, {"serving_grams": 2}])
+def test_update_custom_food_zero_default_with_two_measures_raises(tmp_path, kwargs):
+    client, state, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"].append(dict(_CUP))
+
+    with pytest.raises(CronometerError, match=r"has 2 measures \['g', 'cup'\]"):
+        client.update_custom_food(4242, **kwargs)
+    assert state["endpoints"] == ["add_food", "get_food", "get_food"]
+
+
+def test_update_custom_food_zero_default_with_two_measures_still_renames(tmp_path):
+    """A rename never touches a measure, so an ambiguous default doesn't matter."""
+    client, state, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"].append(dict(_CUP))
+
+    client.update_custom_food(4242, name="Renamed")
+
+    assert state["endpoints"] == ["add_food", "get_food", "get_food", "add_food"]
+    assert fake.foods[4242]["name"] == "Renamed"
+
+
+def test_update_custom_food_zero_default_with_lone_non_gram_measure(tmp_path):
+    client, state, fake, _ = _create_gram_food(tmp_path)
+    fake.foods[4242]["measures"] = [dict(_CUP)]
+
+    client.update_custom_food(4242, calories=120)
+
+    assert state["endpoints"] == ["add_food", "get_food", "get_food", "add_food"]
+    assert {n["id"]: n["amount"] for n in fake.foods[4242]["nutrients"]}[208] == 50.0
 
 
 def test_add_custom_food_tool_sends_serving_quantity(tmp_path, monkeypatch):

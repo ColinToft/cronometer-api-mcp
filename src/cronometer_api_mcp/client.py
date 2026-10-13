@@ -768,7 +768,7 @@ class CronometerClient:
                 food = self.get_food(food_id)
                 _, serving = self._settle_serving(
                     food,
-                    food["defaultMeasureId"],
+                    _only_measure(food)["id"],
                     serving_name,
                     serving_quantity,
                     serving_grams,
@@ -858,10 +858,17 @@ class CronometerClient:
 
     @staticmethod
     def _default_measure(food: dict) -> dict | None:
-        """The food's default measure, or None if it has no measures."""
+        """The food's default measure, or None if it has no measures.
+
+        defaultMeasureId 0 means the server stored no explicit default (seen
+        live for a food whose only measure is "g"); the sole measure is then
+        the default, and with several it's ambiguous, so that's refused.
+        """
         measures = food.get("measures") or []
         if not measures:
             return None
+        if food["defaultMeasureId"] == 0:
+            return _only_measure(food)
         for m in measures:
             if m["id"] == food["defaultMeasureId"]:
                 return m
@@ -948,10 +955,9 @@ class CronometerClient:
             per_serving.update(extra_nutrients or {})
 
             serving_args = (serving_name, serving_grams, serving_quantity)
-            measure = self._default_measure(food)
-            if measure is None and (
-                per_serving or any(v is not None for v in serving_args)
-            ):
+            edits_serving = per_serving or any(v is not None for v in serving_args)
+            measure = self._default_measure(food) if edits_serving else None
+            if edits_serving and measure is None:
                 raise CronometerError(
                     f"Custom food {food_id} has no serving measure, so its "
                     f"serving and per-serving nutrients can't be set; fix it in "
@@ -1091,8 +1097,7 @@ class CronometerClient:
         _check_serving_fits(serving_grams, batch_grams)
         ingredient_rows = self._ingredient_rows(parsed)
 
-        # The first measure in the array becomes the server-assigned
-        # defaultMeasureId, so the serving measure leads.
+        # The serving leads so the server makes it the app's default measure.
         measures = [
             {
                 "id": 0,
@@ -1145,11 +1150,10 @@ class CronometerClient:
         if not food_id:
             raise CronometerError(f"Failed to create recipe: {data}")
 
-        # The first measure becomes the default, which identifies the serving.
         try:
             with self._food_lock(food_id):
                 food = self.get_food(food_id)
-                measure_id = food["defaultMeasureId"]
+                measure_id = self._recipe_serving(food)["id"]
                 food, serving = self._settle_recipe_serving(
                     food, measure_id, serving_name, serving_quantity, serving_grams
                 )
@@ -2412,6 +2416,17 @@ def _check_serving_args(
 
 def _serving_fraction(batch_grams: float, servings_per_batch: float) -> float:
     return round(batch_grams / servings_per_batch, _GRAMS_DECIMALS)
+
+
+def _only_measure(food: dict) -> dict:
+    """The food's one measure, refusing a food with none or several."""
+    measures = food.get("measures") or []
+    if len(measures) != 1:
+        raise CronometerError(
+            f"Food {food['id']} has {len(measures)} measures "
+            f"{[m.get('name') for m in measures]}, expected exactly one"
+        )
+    return measures[0]
 
 
 def _gram_measure_id(food: dict) -> int:
