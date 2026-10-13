@@ -11,6 +11,7 @@ from datetime import date
 from unittest.mock import Mock, call
 
 import pytest
+from test_client import FakeFoodServer, make_server_client
 
 from cronometer_api_mcp import server
 from cronometer_api_mcp.client import CronometerClient
@@ -376,9 +377,11 @@ def test_serving_based_recipe_scales_per_serving_and_has_no_grams(client):
     assert sodium["sources"][1]["grams"] == 100
 
 
-def test_recipe_grams_stay_null_when_mixed_with_weight_entries(client):
+def test_recipe_grams_stay_null_when_logged_by_its_g_measure(client):
+    # A serving-based recipe's "g" is a Recipe measure too, valued at the
+    # grams in one reference serving (seen live).
     weighed = _food(5, "Stew", {SODIUM: 900}, measure_type="Recipe", value=1)
-    weighed["measures"].append({"id": 51, "name": "g", "value": 1, "type": "Weight"})
+    weighed["measures"].append({"id": 51, "name": "g", "value": 250, "type": "Recipe"})
     foods_with_grams = {**FOODS, 5: weighed}
     client.get_foods.side_effect = lambda ids: [foods_with_grams[i] for i in ids]
     by_weight = {**_serving(5, 100, 3), "measureId": 51}
@@ -388,6 +391,29 @@ def test_recipe_grams_stay_null_when_mixed_with_weight_entries(client):
 
     assert stew["grams"] is None
     assert stew["entries"] == 2
+    assert stew["amount"] == 900 + 900 * 100 / 250
+
+
+@pytest.mark.parametrize("value", [None, 0, "100"])
+def test_weight_entries_keep_grams_when_their_measure_has_no_value(client, value):
+    bread = _food(1, "Bread", {SODIUM: 500}, value=value)
+    client.get_foods.side_effect = lambda ids: [bread]
+    client.diaries[date(2026, 10, 14)] = _diary(_serving(1, 40, 1))
+
+    (source,) = _only(_call(nutrients="sodium"))["sources"]
+
+    assert (source["grams"], source["amount"]) == (40, 200)
+
+
+@pytest.mark.parametrize("measure_id", [0, 999])
+def test_weight_entries_without_their_measure_keep_grams(client, measure_id):
+    client.diaries[date(2026, 10, 14)] = _diary(
+        {**_serving(1, 40, 1), "measureId": measure_id}
+    )
+
+    (source,) = _only(_call(nutrients="sodium"))["sources"]
+
+    assert (source["grams"], source["amount"]) == (40, 200)
 
 
 def test_unknown_diary_group_is_labelled_by_number(client):
@@ -407,14 +433,18 @@ def test_failed_food_lookup_reports_its_cause(client):
     assert result == {"status": "error", "message": "RuntimeError: boom"}
 
 
-def test_food_missing_from_lookup_is_an_error(client):
-    client.get_foods.side_effect = lambda ids: [FOODS[i] for i in ids if i != 2]
+def test_unknown_food_is_the_servers_not_found_error(client, tmp_path):
+    real, _ = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[FOODS[1]]))
+    client.get_foods.side_effect = real.get_foods
     client.diaries[date(2026, 10, 14)] = _diary(_serving(1, 100, 1), _serving(2, 10, 1))
 
     result = _call(nutrients="sodium")
 
-    assert result["status"] == "error"
-    assert "food_ids 2;" in result["message"]
+    assert result == {
+        "status": "error",
+        "message": "CronometerError: Cronometer API error: "
+        "WebServiceV2 doGetFoods(): Food 2 not found",
+    }
 
 
 # ---------------------------------------------------------------------------

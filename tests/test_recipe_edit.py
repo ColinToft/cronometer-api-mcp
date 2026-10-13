@@ -552,7 +552,7 @@ def test_ingredients_replace_list_leaving_derivation_to_server(tmp_path):
         {
             "id": 0,
             "foodId": 619,
-            "measureId": 1960,  # no gram measure: default measure
+            "measureId": 0,  # no gram measure (the server accepts 0)
             "translationId": 0,
             "grams": 16.0,
             "value": 16.0,

@@ -289,13 +289,11 @@ def _food_log_day(
         picked = {names[nid]: amounts[nid] for nid in nutrient_ids if nid in amounts}
         for name, amount in picked.items():
             totals[name] += amount
+        # enrich_diary_servings sets serving_size only while the food still has
+        # the logged measure, servings only when that measure has a value, and
+        # gives a serving-based recipe's measure null grams.
         size = entry.get("serving_size")
-        # enrich_diary_servings falls back to the default measure when the
-        # logged one is gone; that measure would misdescribe the amount.
-        logged = size is not None and size["measure_id"] == entry["measureId"]
-        # enrich_diary_servings sets servings only when the measure has a
-        # weight, and gives a serving-based recipe's measure null grams.
-        counted = logged and "servings" in entry
+        counted = "servings" in entry
         recipe = counted and size["grams"] is None
         quantity = size["quantity"] if counted else None
         entries.append(
@@ -306,7 +304,7 @@ def _food_log_day(
                 "food_id": entry["foodId"],
                 "measure_id": entry["measureId"],
                 "grams": None if recipe else entry["grams"],
-                "measure": size["unit"] if logged else None,
+                "measure": size["unit"] if size else None,
                 "quantity": None
                 if quantity is None
                 else round(quantity * entry["servings"], 2),
@@ -419,7 +417,7 @@ def _food_servings(*diaries: dict) -> list[dict]:
     """The Serving entries of enriched diaries.
 
     Raises if any lacks nutrient data (enrichment leaves an entry bare when
-    get_foods doesn't return its food), since totals would silently undercount.
+    its grams isn't a number), since totals would silently undercount.
     """
     entries = [_diary_entries(diary) for diary in diaries]
     servings = [e for day in entries for e in day if e["type"] == "Serving"]
@@ -486,10 +484,10 @@ def _rank_sources(
             )
             food["amount"] += amount
             food["entries"] += 1
-            # Serving-based recipe entries count reference servings, not grams.
-            serving_size = entry.get("serving_size")
+            # Serving-based recipe entries count measure units, not grams; only
+            # they have servings without a portion weight.
             if food["grams"] is not None and (
-                serving_size is None or serving_size["grams"] is not None
+                "servings" not in entry or entry["serving_size"]["grams"] is not None
             ):
                 food["grams"] += entry["grams"]
             else:

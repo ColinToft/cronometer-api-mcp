@@ -627,12 +627,7 @@ class CronometerClient:
         """
         payload = {"id": food_id, "config": {"call_version": 1}}
         data = self._request("/api/v2/get_food", payload)
-        logger.info(
-            "Fetched food %d: %r (defaultMeasureId=%s)",
-            food_id,
-            data.get("name"),
-            data.get("defaultMeasureId"),
-        )
+        logger.info("Fetched food %d: %r", food_id, data.get("name"))
         return data
 
     def get_foods(self, food_ids: list[int]) -> list[dict]:
@@ -1985,17 +1980,29 @@ class CronometerClient:
 
           - name: from the food object
           - serving_size: {measure_id, quantity, unit, grams} defining one
-            portion in the entry's measureId (falls back to defaultMeasureId).
-            Recipe measures have null grams: their value is a reference-serving
-            count, not a gram weight.
+            portion in the entry's measureId, only while the food still has
+            that measure. Recipe measures have null grams (see below).
           - servings: number of those portions consumed, when derivable
-          - nutrients: the food's nutrient profile scaled to the entry's amount
-            (per-100g for Weight/Atomic measures, per-serving for Recipe
-            measures), as {nutrient_id: amount}
+          - nutrients: the food's nutrient profile scaled to the entry's
+            amount, as {nutrient_id: amount}
 
-        A get_foods failure raises. If a food is not
-        returned, the corresponding entries are left unchanged. The diary dict
-        is mutated in place and also returned. Non-Serving entries (Exercise,
+        How "grams" reads depends on the food (all verified live against the
+        server's own day totals):
+          - Weight/Atomic measures: real grams. Nutrients are per 100 g, so
+            they scale by grams / 100 whatever the measure, even one the food
+            no longer has (measureId 0, or a deleted measure the server left
+            the entry on).
+          - Recipe measures (serving-based recipes made in the app): "grams" is
+            a count of the measure's units, and the measure's value is how many
+            units make one reference serving, which the nutrients are stored
+            per. So nutrients scale by grams / value, and servings is grams.
+            Deleting a measure moves its entries onto the recipe's "g"
+            measure. An entry whose measure is missing anyway (e.g. logged
+            with measureId 0) can't be scaled: the server then divides by a
+            value that isn't the default measure's, so this raises.
+
+        A get_foods failure raises, including an unknown food id. The diary
+        dict is mutated in place and also returned. Non-Serving entries (Exercise,
         Biometric) already carry a name and are left untouched.
         """
         if not isinstance(diary, dict):
@@ -2022,19 +2029,32 @@ class CronometerClient:
         for entry in entries:
             if not isinstance(entry, dict) or entry.get("type") != "Serving":
                 continue
-            food = food_by_id.get(entry.get("foodId"))
-            if not food:
-                continue
+            food = food_by_id[entry["foodId"]]
 
             entry["name"] = food.get("name")
 
-            measures = {
-                m.get("id"): m for m in food.get("measures", []) if isinstance(m, dict)
-            }
-            measure = measures.get(entry.get("measureId")) or measures.get(
-                food.get("defaultMeasureId")
+            measures = [m for m in food.get("measures", []) if isinstance(m, dict)]
+            measure = next(
+                (m for m in measures if m.get("id") == entry.get("measureId")), None
             )
+            # The server makes every measure of a serving-based recipe, even
+            # its "g", type Recipe (seen live); a mix has no known reading.
+            recipe_flags = {m.get("type") == "Recipe" for m in measures}
+            recipe = recipe_flags == {True}
+            if len(recipe_flags) > 1:
+                raise CronometerError(
+                    f"Food {food.get('id')} ({food.get('name')!r}) mixes Recipe "
+                    f"and other measure types, so its diary amounts can't be read"
+                )
             grams = entry.get("grams")
+            if recipe and not (measure and _is_positive_number(measure.get("value"))):
+                raise CronometerError(
+                    f"Diary entry {entry.get('servingId')} ({food.get('name')!r}, "
+                    f"a serving-based recipe) is logged with measure "
+                    f"{entry.get('measureId')}, which is missing or has no "
+                    f"usable value, so its amount can't be read; re-log it in "
+                    f"the Cronometer app"
+                )
             if measure:
                 portion_value = measure.get("value")
                 quantity = measure.get("amount", 1)
@@ -2044,26 +2064,17 @@ class CronometerClient:
                     "measure_id": measure.get("id"),
                     "quantity": quantity,
                     "unit": measure.get("name"),
-                    "grams": None if measure.get("type") == "Recipe" else portion_value,
+                    "grams": None if recipe else portion_value,
                 }
-                if (
-                    isinstance(grams, (int, float))
-                    and isinstance(portion_value, (int, float))
-                    and portion_value
+                if isinstance(grams, (int, float)) and _is_positive_number(
+                    portion_value
                 ):
-                    entry["servings"] = round(grams / portion_value, 4)
+                    entry["servings"] = round(
+                        grams if recipe else grams / portion_value, 4
+                    )
 
-            # Nutrient scaling depends on the measure type:
-            #   - Recipe measures: nutrients are stored per one reference
-            #     serving and the diary "grams" field is a serving count, so
-            #     scale by grams directly.
-            #   - Weight/Atomic measures: nutrients are stored per-100g and
-            #     "grams" is real grams, so scale by grams / 100.
             if isinstance(grams, (int, float)):
-                if measure and measure.get("type") == "Recipe":
-                    scale = grams
-                else:
-                    scale = grams / 100.0
+                scale = grams / (measure["value"] if recipe else 100.0)
                 entry["nutrients"] = {
                     n["id"]: round(n["amount"] * scale, 4)
                     for n in food.get("nutrients", [])
@@ -2391,14 +2402,14 @@ def _gram_measure_id(food: dict) -> int:
 
     Ingredient measures are display metadata -- Cronometer renders the amount
     as grams / measure value -- so the 1-gram measure makes the UI show the
-    gram weight directly. Falls back to the food's default measure when no
-    gram measure exists, since `grams` is what the nutrient math uses either
-    way.
+    gram weight directly. A food without one gets 0: the server accepts it and
+    derives the same nutrients and batch weight as from a real measure
+    (verified live), since `grams` is what the nutrient math uses.
     """
     for m in food.get("measures", []):
         if isinstance(m, dict) and m.get("name") == "g" and m.get("value") == 1:
             return m["id"]
-    return food.get("defaultMeasureId") or 0
+    return 0
 
 
 def _translation_id(food: dict) -> int:

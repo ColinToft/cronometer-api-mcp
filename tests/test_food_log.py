@@ -9,6 +9,7 @@ from datetime import date
 from unittest.mock import Mock, call
 
 import pytest
+from test_client import FakeFoodServer, make_server_client
 
 from cronometer_api_mcp import server
 from cronometer_api_mcp.client import CronometerClient
@@ -54,7 +55,10 @@ FOODS = {
         "id": 2,
         "name": "Stew",
         "measures": [
-            {"id": 20, "name": "bowl", "value": 1, "amount": 1, "type": "Recipe"}
+            {"id": 20, "name": "bowl", "value": 1, "amount": 1, "type": "Recipe"},
+            # A serving-based recipe's "g" is a Recipe measure valued at the
+            # grams in one reference serving.
+            {"id": 21, "name": "g", "value": 250, "amount": 1, "type": "Recipe"},
         ],
         "nutrients": [{"id": ENERGY, "amount": 400}, {"id": PROTEIN, "amount": 30}],
     },
@@ -193,13 +197,34 @@ def test_serving_based_recipe_has_null_grams_and_a_count(client):
     assert entry["nutrients"] == {"Energy": 600.0, "Protein": 45.0}
 
 
-def test_a_measure_the_food_no_longer_has_is_null_not_the_default(client):
-    # enrich_diary_servings describes it with the default measure ("large").
-    client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 1, 999, 100, 2))
+def test_serving_based_recipe_logged_in_grams(client):
+    client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 2, 21, 300, 3))
 
     (entry,) = _call()["entries"]
 
-    assert entry["measure_id"] == 999
+    assert entry["grams"] is None
+    assert (entry["measure"], entry["quantity"]) == ("g", 300)
+    assert entry["nutrients"] == {"Energy": 480.0, "Protein": 36.0}
+
+
+@pytest.mark.parametrize("measure_id", [0, 999])
+def test_serving_based_recipe_without_its_measure_is_an_error(client, measure_id):
+    client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 2, measure_id, 2, 3))
+
+    result = _call()
+
+    assert result["status"] == "error"
+    assert "Diary entry 7 ('Stew', a serving-based recipe)" in result["message"]
+
+
+@pytest.mark.parametrize("measure_id", [0, 999])
+def test_a_measure_the_food_no_longer_has_is_null_not_the_default(client, measure_id):
+    # The egg's defaultMeasureId (10, "large") must not describe it.
+    client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 1, measure_id, 100, 2))
+
+    (entry,) = _call()["entries"]
+
+    assert entry["measure_id"] == measure_id
     assert entry["grams"] == 100
     assert entry["measure"] is None
     assert entry["quantity"] is None
@@ -332,10 +357,26 @@ def test_failed_food_lookup_reports_its_cause(client):
     assert _call() == {"status": "error", "message": "RuntimeError: boom"}
 
 
-def test_food_missing_from_lookup_is_an_error_not_a_bare_entry(client):
-    client.get_foods.side_effect = lambda ids: [FOODS[i] for i in ids if i != 1]
+def test_unknown_food_is_the_servers_not_found_error(client, tmp_path):
+    # A real client against the fake server, which answers an unknown id with
+    # the live-captured FAIL; food 2 is known, food 1 isn't.
+    real, _ = make_server_client(tmp_path, FakeFoodServer(ingredient_foods=[FOODS[2]]))
+    client.get_foods.side_effect = real.get_foods
     client.diaries[date(2026, 10, 14)] = _diary(
         _serving(7, 1, 10, 50, 1), _serving(8, 2, 20, 1, 3)
+    )
+
+    result = _call()
+
+    assert result == {
+        "status": "error",
+        "message": "CronometerError: Cronometer API error: WebServiceV2 doGetFoods(): Food 1 not found",
+    }
+
+
+def test_entry_without_numeric_grams_is_an_error_not_a_bare_entry(client):
+    client.diaries[date(2026, 10, 14)] = _diary(
+        _serving(7, 1, 10, None, 1), _serving(8, 2, 20, 1, 3)
     )
 
     result = _call()
