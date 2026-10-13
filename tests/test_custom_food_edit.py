@@ -676,3 +676,12 @@ def test_update_custom_food_refuses_renaming_or_resizing_weight_unit(
     with pytest.raises(CronometerError, match="is the weight unit"):
         client.update_custom_food(FOOD_ID, **kwargs)
     assert len(state["payloads"]) == 1  # the read, no save
+
+
+@pytest.mark.parametrize("unit", ["g", "oz", " G "])
+def test_update_custom_food_refuses_renaming_serving_to_weight_unit(tmp_path, unit):
+    client, state = make_cold_client(tmp_path, [])
+
+    with pytest.raises(ValueError, match="is a weight unit"):
+        client.update_custom_food(FOOD_ID, serving_name=unit)
+    assert state["payloads"] == []

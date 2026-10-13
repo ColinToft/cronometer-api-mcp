@@ -914,6 +914,11 @@ class CronometerClient:
 
         if serving_name is not None:
             serving_name = _serving_name(serving_name)
+            if _is_weight_unit(serving_name):
+                raise ValueError(
+                    f"serving_name {serving_name!r} is a weight unit; name the "
+                    f"serving (e.g. 'cup', 'slice')"
+                )
         for label, v in (
             ("serving_grams", serving_grams),
             ("serving_quantity", serving_quantity),

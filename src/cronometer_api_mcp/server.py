@@ -1095,8 +1095,7 @@ def get_food_details(food_id: int) -> str:
     Use this after search_foods to get the full nutrient profile and
     available measure_ids needed for add_food_entry. For a recipe it also
     returns its ingredients (in update_recipe's input shape) and comments; a
-    deleted (retired) food is flagged with "retired": true. default_measure_id
-    is the measure logged last, not necessarily the serving.
+    deleted (retired) food is flagged with "retired": true.
 
     Args:
         food_id: Food ID from search_foods results.
@@ -1121,7 +1120,6 @@ def get_food_details(food_id: int) -> str:
         details = {
             "food_id": data.get("id"),
             "name": data.get("name"),
-            "default_measure_id": data.get("defaultMeasureId"),
             "measures": measures,
             "nutrients": data.get("nutrients", []),
         }
@@ -1267,12 +1265,12 @@ def update_custom_food(
         extra_nutrients: Additional nutrients keyed by Cronometer nutrient ID
             (from get_daily_nutrition) and valued per serving; must not reuse
             an ID the named args already cover.
-        serving_name: New name for the default serving. The app shows the
+        serving_name: New name for the serving; not "g" or "oz". The app shows the
             serving as "<quantity> <name>"; a leading number ("2 cookies")
             is refused: pass it as serving_quantity.
-        serving_grams: New total weight of the default serving in grams.
+        serving_grams: New total weight of the serving in grams.
             Also resets the quantity to serving_quantity (or 1).
-        serving_quantity: How many units make up the default serving
+        serving_quantity: How many units make up the serving
             (default 1 whenever serving_grams is passed). Without
             serving_grams the serving's total weight stays the same, so each
             unit gets lighter or heavier: changing "2 cookies = 30 g" to 3
