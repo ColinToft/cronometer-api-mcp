@@ -88,6 +88,16 @@ _WEIGHT_UNIT_MEASURES = frozenset({"g", "oz"})
 _RECIPE_FIXED_MEASURES = _WEIGHT_UNIT_MEASURES | {_FULL_RECIPE_MEASURE}
 # The web client saves a serving with a gram weight as "Weight"; "Atomic" is a
 # count unit (a supplement "tablet"). See _check_recipe_ingredient.
+#
+# The server stores a diary entry as a count of its measure, and reports its
+# grams as count x the measure's value for "Weight", but count x 100 for
+# "Atomic" (whatever its value). Logging by grams, as this client does, is
+# right either way: the count is derived by the same rule. Editing a measure later re-reads every
+# entry logged by it (verified live, Oct 13, 2026): resizing a Weight measure
+# rescales those entries, resizing an Atomic one doesn't, and switching a
+# measure's type multiplies them by value/100 (Atomic to Weight) or 100/value
+# (Weight to Atomic): 180 g logged by an Atomic "g" became 1.8 g. Never change
+# a logged measure's type.
 _WEIGHED_MEASURE = "Weight"
 # Recipe serving weights are sent rounded to this many decimals, and read back
 # within _GRAMS_TOL: a batch that doesn't divide evenly (4561 g / 6) would
@@ -893,9 +903,10 @@ class CronometerClient:
         alone leaves the stored per-100g values as they are, so the food's
         per-serving numbers shift with the new weight.
 
-        Resizing a measure rescales every diary entry logged by it (seen
-        live), so the measure is picked by _custom_food_serving, never guessed,
-        and a "g" or "oz" measure is never renamed or resized.
+        Resizing a "Weight" measure rescales every diary entry logged by it
+        (see _WEIGHED_MEASURE), so the measure is picked by
+        _custom_food_serving, never guessed, and a "g" or "oz" measure is never
+        renamed or resized. Measure types are re-sent unchanged.
 
         A measure is `amount` units of `name` weighing `value` grams in total,
         and the app renders the serving as "<amount> <name>". Setting the
@@ -2469,7 +2480,10 @@ def _check_recipe_ingredient(food: dict) -> None:
         f"Food {food['id']} ({food['name']!r}) can't be a recipe ingredient: "
         f"its measures {[(m['name'], m['type']) for m in others]} aren't type "
         f"'Weight', and Cronometer leaves such a food's grams out of a "
-        f"recipe's batch weight, which would inflate its per-100 g nutrients"
+        f"recipe's batch weight, which would inflate its per-100 g nutrients. "
+        f"If it's your own food, don't switch an 'Atomic' measure to 'Weight' "
+        f"to fix this: Cronometer re-reads every diary entry logged by it at "
+        f"value/100 of its grams. Make a new custom food for recipes instead"
     )
 
 

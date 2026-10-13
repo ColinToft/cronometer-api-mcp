@@ -226,7 +226,10 @@ every save, so the client sends none, and reads both back to check them. The ser
 ingredient's grams toward the batch only if all of the food's measures are type `Weight` (what the
 web client saves for a serving with a gram weight); with an `Atomic` one, its nutrients are added but
 its grams aren't, so the batch weight comes out short. Custom foods are therefore saved with
-`Weight` servings, and recipes refuse other ingredients. No hard-delete endpoint for foods is known, so
+`Weight` servings, and recipes refuse other ingredients. Don't fix an older food by switching an
+`Atomic` measure to `Weight`: the server stores a diary entry as a count of its measure, with a `Weight` unit
+weighing its value in grams and an `Atomic` one 100 g, so the switch rescales every entry logged by
+it (180 g logged by an `Atomic` "g" read 1.8 g after switching it to `Weight`). No hard-delete endpoint for foods is known, so
 `delete_custom_food` sets `retired` instead (the food leaves search after a few seconds but stays
 readable by id, and diary entries that use it are kept).
 Retired foods can't be edited. Serving names are sent exactly as given with an explicit quantity,
