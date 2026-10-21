@@ -94,11 +94,7 @@ def _normalize_group_label(label: str) -> str:
 
 
 def _diary_groups() -> dict[str, int]:
-    """The configured diary group names, {name: group number}, in order.
-
-    Read from CRONOMETER_DIARY_GROUPS on every call (cheap), so there's no
-    cached copy to go stale. A bad value raises rather than falling back.
-    """
+    """{name: group number} from CRONOMETER_DIARY_GROUPS, read per call (no cache)."""
     raw = os.environ.get(_DIARY_GROUPS_ENV, _DEFAULT_DIARY_GROUPS)
     groups: dict[str, int] = {}
     for number, part in enumerate(raw.split(","), start=1):

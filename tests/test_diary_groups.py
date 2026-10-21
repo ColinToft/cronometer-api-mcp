@@ -1,9 +1,4 @@
-"""Diary group names from CRONOMETER_DIARY_GROUPS.
-
-The API exposes no group names, so they're account configuration. Each test
-starts from the defaults (conftest.py clears the variable) and sets its own
-value through monkeypatch, so nothing leaks between tests.
-"""
+"""Diary group names from CRONOMETER_DIARY_GROUPS (conftest.py clears it)."""
 
 import json
 
@@ -112,7 +107,7 @@ def test_a_bad_value_fails_every_tool_that_names_groups(groups, fake):
 
 
 def test_main_refuses_a_bad_value_before_serving(groups, monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)  # no .env to load
+    monkeypatch.chdir(tmp_path)
     ran = []
     monkeypatch.setattr(server.mcp, "run", lambda **kw: ran.append(kw))
     groups("auto")
@@ -201,8 +196,8 @@ def test_writes_by_every_configured_name(groups, fake, label, number):
 @pytest.mark.parametrize(
     "label",
     [
-        "snacks",  # a default name Colin doesn't use
-        "group 5",  # named: "evening snack"
+        "snacks",
+        "group 5",
         "group 4",
         "group 1",
         "group 0",
@@ -246,8 +241,6 @@ def test_add_food_entry_writes_by_a_configured_name(groups, fake):
 def test_auto_resolves_through_the_configured_names(
     groups, fake, monkeypatch, hour, number
 ):
-    """Colin's dinner is group 4, so "auto" at 18:00 must write 4, not the
-    default dinner's 3."""
     f = fake()
     groups(COLIN)
     _at_hour(monkeypatch, hour)
@@ -310,8 +303,6 @@ def test_auto_with_the_defaults_is_unchanged(fake, monkeypatch, hour, number):
 
 
 def test_every_label_round_trips_through_get_food_log(groups, fake, monkeypatch):
-    """Entries written by each configured name and by "group 6" read back
-    under the same label."""
     fake()
     groups(COLIN)
     labels = [*COLIN_GROUPS, "group 6"]
