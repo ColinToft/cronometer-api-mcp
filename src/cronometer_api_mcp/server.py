@@ -80,6 +80,24 @@ mcp = MCPServer(
 # Cronometer's default diary groups. An entry's group is its order >> 16.
 _DIARY_GROUPS = {"breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
 _DIARY_GROUP_NAMES = {number: name for name, number in _DIARY_GROUPS.items()}
+# Groups past the default four (added in the app's diary settings) have no name
+# the API exposes, so they're read as "group N" and written by that same label.
+_EXTRA_GROUP = re.compile(r"group ([1-9][0-9]*)")
+
+
+def _diary_group_number(group: object) -> int:
+    """A diary_group label's group number: a default name, or "group N" for N >= 5."""
+    if isinstance(group, str):
+        label = group.strip().lower()
+        if label in _DIARY_GROUPS:
+            return _DIARY_GROUPS[label]
+        m = _EXTRA_GROUP.fullmatch(label)
+        if m and int(m.group(1)) > len(_DIARY_GROUPS):
+            return int(m.group(1))
+    raise ValueError(
+        "diary_group must be breakfast, lunch, dinner, snacks, or \"group N\" "
+        f"(N >= 5, a group added in the app), got {group!r}"
+    )
 
 
 def _meal_group_for_hour(hour: int) -> int:
@@ -549,7 +567,9 @@ def add_food_entry(
         date: Date to log as YYYY-MM-DD (defaults to today).
         translation_id: Translation ID from search results (usually 0).
         diary_group: Meal slot -- one of "auto", "breakfast", "lunch",
-                     "dinner", "snacks" (case-insensitive, default "auto").
+                     "dinner", "snacks", or "group N" for a group added in
+                     the app (N >= 5, as get_food_log labels it);
+                     case-insensitive, default "auto".
                      "auto" picks by the current hour in the account's
                      timezone: breakfast 4-10, lunch 10-14, dinner 14-21,
                      snacks otherwise.
@@ -590,7 +610,8 @@ def add_food_entries(entries: list[dict]) -> str:
     Args:
         entries: Objects with keys food_id, measure_id (from get_food_details;
             0 is refused), grams, date (YYYY-MM-DD), diary_group (breakfast,
-            lunch, dinner, or snacks; "auto" is refused), and optionally
+            lunch, dinner, snacks, or "group N" (N >= 5) for a group added in
+            the app, as get_food_log labels it; "auto" is refused), and optionally
             translation_id (default 0). Unknown keys are refused.
     """
     try:
@@ -755,11 +776,7 @@ def _parse_add_entry(item: object) -> dict:
     grams = item["grams"]
     if isinstance(grams, bool) or not _is_positive_number(grams):
         raise ValueError(f"grams must be a positive number, got {grams!r}")
-    group = item["diary_group"]
-    if not (isinstance(group, str) and group.strip().lower() in _DIARY_GROUPS):
-        raise ValueError(
-            f"diary_group must be breakfast, lunch, dinner, or snacks, got {group!r}"
-        )
+    group = _diary_group_number(item["diary_group"])
     translation_id = item.get("translation_id", 0)
     if type(translation_id) is not int or translation_id < 0:
         raise ValueError(
@@ -771,7 +788,7 @@ def _parse_add_entry(item: object) -> dict:
         "grams": grams,
         "translation_id": translation_id,
         "day": _iso_day(item["date"]),
-        "diary_group": _DIARY_GROUPS[group.strip().lower()],
+        "diary_group": group,
     }
 
 

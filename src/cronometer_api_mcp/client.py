@@ -1698,12 +1698,14 @@ class CronometerClient:
             translation_id: Translation ID (from search results, usually 0).
             day: Date to log to. Defaults to today.
             diary_group: Meal group: 1 = Breakfast, 2 = Lunch, 3 = Dinner,
-                         4 = Snacks.
+                         4 = Snacks, 5+ = groups added in the app's diary
+                         settings. The API can't list the account's groups,
+                         so a number past the last one isn't caught here.
 
         Returns the serving confirmation dict from the API.
         """
-        if diary_group not in (1, 2, 3, 4):
-            raise ValueError(f"diary_group must be 1-4, got {diary_group!r}")
+        if type(diary_group) is not int or diary_group < 1:
+            raise ValueError(f"diary_group must be a positive integer, got {diary_group!r}")
         now = self.now()
         day_str = self._format_day(day)
         time_str = f"{now.hour}:{now.minute}:{now.second}"
