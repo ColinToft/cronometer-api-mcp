@@ -274,6 +274,28 @@ def test_meals_decode_order_and_unknown_groups_are_numbered(client):
     assert meals == ["snacks", "dinner", "lunch", "breakfast", "group 5"]
 
 
+def test_meals_use_the_configured_group_names(client, monkeypatch):
+    monkeypatch.setenv(
+        "CRONOMETER_DIARY_GROUPS",
+        "breakfast,lunch,afternoon snack,dinner,evening snack",
+    )
+    client.diaries[date(2026, 10, 14)] = _diary(
+        *(_serving(g, 1, 11, 1, g) for g in (0, 1, 2, 3, 4, 5, 6))
+    )
+
+    meals = [e["meal"] for e in _call()["entries"]]
+
+    assert meals == [
+        "group 0",
+        "breakfast",
+        "lunch",
+        "afternoon snack",
+        "dinner",
+        "evening snack",
+        "group 6",
+    ]
+
+
 def test_non_food_entries_pass_through(client):
     run = {"type": "Exercise", "name": "Running", "order": 1, "servingId": 9}
     client.diaries[date(2026, 10, 14)] = _diary(_serving(7, 1, 10, 50, 1), run)

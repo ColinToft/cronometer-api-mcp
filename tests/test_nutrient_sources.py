@@ -551,10 +551,22 @@ def test_unknown_diary_shape_fails(client, response):
 # ---------------------------------------------------------------------------
 
 
-def test_diary_group_maps_are_inverse():
-    assert server._DIARY_GROUP_NAMES == {
-        1: "breakfast",
-        2: "lunch",
-        3: "dinner",
-        4: "snacks",
-    }
+def test_diary_groups_use_the_configured_names(client, monkeypatch):
+    monkeypatch.setenv(
+        "CRONOMETER_DIARY_GROUPS",
+        "breakfast,lunch,afternoon snack,dinner,evening snack",
+    )
+    client.diaries[date(2026, 10, 14)] = _diary(
+        *(_serving(1, 20, g) for g in (1, 2, 3, 4, 5, 6))
+    )
+
+    sodium = _only(_call(nutrients="sodium"))
+
+    assert list(sodium["by_diary_group"]) == [
+        "breakfast",
+        "lunch",
+        "afternoon snack",
+        "dinner",
+        "evening snack",
+        "group 6",
+    ]

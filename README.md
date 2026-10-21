@@ -68,6 +68,28 @@ export CRONOMETER_ACCOUNT_TZ="America/Los_Angeles"
 When set, this takes precedence over both the value reported at login and any
 cached session, so it also overrides a stale cached timezone.
 
+#### Optional: name your diary groups
+
+Each diary entry belongs to a numbered diary group, but the API exposes no
+group names, so names you set in the app (renamed groups, added groups such as
+an evening snack) can't be read. List them, in order, for groups 1, 2, 3, ...:
+
+```bash
+export CRONOMETER_DIARY_GROUPS="breakfast,lunch,afternoon snack,dinner,evening snack"
+```
+
+Unset, it defaults to Cronometer's `breakfast,lunch,dinner,snacks`. Names are
+case-insensitive and whitespace is normalized; an empty or repeated name,
+`auto`, or a `group N` lookalike fails at startup. `get_food_log` and
+`get_nutrient_sources` label entries with these names, and the write tools
+take them as `diary_group`. A group past the last name reads and writes as
+`"group N"`. `add_food_entry`'s `"auto"` picks `breakfast`, `lunch`, `dinner`
+or `snacks` by the hour, and fails if that name isn't configured.
+
+The app's Diary Settings number groups one higher than the API: its
+"Group 1: Uncategorized" is API group 0, its "Group 2" is API group 1 (the
+first name in the list), and so on.
+
 ### 3. Configure your MCP client
 
 `uvx` downloads and runs the server on demand -- no separate install step.
@@ -261,7 +283,7 @@ client.add_serving(
     food_id=food["id"],
     measure_id=food["measures"][0]["id"],
     grams=200,
-    diary_group=3,  # 1 breakfast, 2 lunch, 3 dinner, 4 snacks, 5+ groups added in the app
+    diary_group=3,  # by default 1 breakfast, 2 lunch, 3 dinner, 4 snacks; 5+ groups added in the app
 )
 
 # Get today's diary

@@ -150,7 +150,9 @@ def test_add_serving_accepts_groups_added_in_the_app(tmp_path, frozen_utc, group
 
 
 @pytest.mark.parametrize("group", [0, -1, None, "2", 2.0, True])
-def test_add_serving_refuses_a_group_that_is_not_a_positive_int(tmp_path, frozen_utc, group):
+def test_add_serving_refuses_a_group_that_is_not_a_positive_int(
+    tmp_path, frozen_utc, group
+):
     client = _client(tmp_path, "America/Los_Angeles")
     captured = _capture_serving(client)
 
