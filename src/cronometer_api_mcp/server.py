@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import re
 import threading
 from datetime import date, timedelta
@@ -77,20 +78,87 @@ mcp = MCPServer(
     version=_server_version(),
 )
 
-# Cronometer's default diary groups. An entry's group is its order >> 16.
-_DIARY_GROUPS = {"breakfast": 1, "lunch": 2, "dinner": 3, "snacks": 4}
-_DIARY_GROUP_NAMES = {number: name for name, number in _DIARY_GROUPS.items()}
+# Diary groups. An entry's group is its order >> 16. The API exposes no group
+# names (users rename and add groups in the app), so the names are account
+# configuration: CRONOMETER_DIARY_GROUPS lists the names of groups 1..N in order.
+# Groups past the last name are read as "group N" and written by that label.
+_DIARY_GROUPS_ENV = "CRONOMETER_DIARY_GROUPS"
+_DEFAULT_DIARY_GROUPS = "breakfast,lunch,dinner,snacks"
+_GROUP_LABEL = re.compile(r"group ([1-9][0-9]*)")
+# Refused as a configured name: it would collide with the "group N" labels.
+_GROUP_LIKE_NAME = re.compile(r"group ?[0-9]+")
 
 
-def _meal_group_for_hour(hour: int) -> int:
-    """The diary group add_food_entry's "auto" picks for an hour of the day."""
+def _normalize_group_label(label: str) -> str:
+    return " ".join(label.split()).lower()
+
+
+def _diary_groups() -> dict[str, int]:
+    """{name: group number} from CRONOMETER_DIARY_GROUPS, read per call (no cache)."""
+    raw = os.environ.get(_DIARY_GROUPS_ENV, _DEFAULT_DIARY_GROUPS)
+    groups: dict[str, int] = {}
+    for number, part in enumerate(raw.split(","), start=1):
+        name = _normalize_group_label(part)
+        if not name:
+            problem = f"name {number} is empty"
+        elif name in groups:
+            problem = f"{name!r} is listed twice"
+        elif name == "auto":
+            problem = '"auto" is reserved for add_food_entry'
+        elif _GROUP_LIKE_NAME.fullmatch(name):
+            problem = f'{name!r} looks like a "group N" label'
+        else:
+            groups[name] = number
+            continue
+        raise ValueError(
+            f"{_DIARY_GROUPS_ENV} must be comma-separated diary group names "
+            f"for groups 1, 2, 3, ... in order; {problem} in {raw!r}"
+        )
+    return groups
+
+
+def _group_name(group: int) -> str:
+    """A group number's label: its configured name, else "group N"."""
+    names = {number: name for name, number in _diary_groups().items()}
+    return names.get(group, f"group {group}")
+
+
+def _diary_group_number(group: object) -> int:
+    """A diary_group label's group number: a configured name, or "group N"
+    for N past the last configured name."""
+    groups = _diary_groups()
+    if isinstance(group, str):
+        label = _normalize_group_label(group)
+        if label in groups:
+            return groups[label]
+        m = _GROUP_LABEL.fullmatch(label)
+        if m and int(m.group(1)) > len(groups):
+            return int(m.group(1))
+    raise ValueError(
+        f'diary_group must be {", ".join(groups)}, or "group N" '
+        f"(N >= {len(groups) + 1}, a group past the names in "
+        f"{_DIARY_GROUPS_ENV}), got {group!r}"
+    )
+
+
+def _auto_diary_group(hour: int) -> str:
+    """The diary group name add_food_entry's "auto" picks for an hour of the day."""
     if 4 <= hour < 10:
-        return _DIARY_GROUPS["breakfast"]
-    if 10 <= hour < 14:
-        return _DIARY_GROUPS["lunch"]
-    if 14 <= hour < 21:
-        return _DIARY_GROUPS["dinner"]
-    return _DIARY_GROUPS["snacks"]
+        name = "breakfast"
+    elif 10 <= hour < 14:
+        name = "lunch"
+    elif 14 <= hour < 21:
+        name = "dinner"
+    else:
+        name = "snacks"
+    groups = _diary_groups()
+    if name not in groups:
+        raise ValueError(
+            f'diary_group "auto" picks {name!r} at hour {hour}, but '
+            f"{_DIARY_GROUPS_ENV} has no group named {name!r} (its names are "
+            f"{', '.join(groups)}); pass diary_group explicitly"
+        )
+    return name
 
 
 _client: CronometerClient | None = None
@@ -229,8 +297,9 @@ def get_food_log(
     Each food entry has:
 
       - serving_id: the entry's ID, for remove_food_entries
-      - meal: breakfast, lunch, dinner, snacks (Cronometer's default names,
-        even if renamed in the app), or "group N" for any further group
+      - meal: the diary group's name from CRONOMETER_DIARY_GROUPS (default
+        breakfast, lunch, dinner, snacks; the API can't read names set in
+        the app), or "group N" for a group past the configured names
       - food, food_id, measure_id: what add_food_entries takes to re-log it
       - grams: the logged weight; null for a serving-based recipe, whose
         diary amount counts the logged measure's units (quantity holds it)
@@ -331,7 +400,7 @@ def get_nutrient_sources(
     nutrient, not only the few get_food_log reports per entry.
 
     For each requested nutrient over the date range, returns the total, unit,
-    the split by diary group (breakfast, lunch, dinner, snacks), and the top_n
+    the split by diary group (named as in get_food_log), and the top_n
     foods by amount. The same food is combined across entries and days. Each
     source has the food name, food_id, grams eaten in total, amount supplied,
     percent of the total, and the number of diary entries. Foods past top_n
@@ -340,9 +409,10 @@ def get_nutrient_sources(
     and a food with no data for a nutrient adds nothing to it.
 
     grams is null for a serving-based recipe, whose diary amounts count
-    measure units, not grams. Diary groups 1-4 use Cronometer's
-    default names even if they were renamed in the app; any further group
-    shows as "group N".
+    measure units, not grams. Diary groups use the names configured in
+    CRONOMETER_DIARY_GROUPS (default breakfast, lunch, dinner, snacks; the
+    API can't read names set in the app); any further group shows as
+    "group N".
 
     Args:
         nutrients: One nutrient name or a list, matched case-insensitively
@@ -394,10 +464,6 @@ def _nutrient_queries(nutrients: list[str] | str) -> list[str]:
                 f"Nutrient names must be non-empty strings; got {query!r}."
             )
     return nutrients
-
-
-def _group_name(group: int) -> str:
-    return _DIARY_GROUP_NAMES.get(group, f"group {group}")
 
 
 def _diary_entries(diary: dict) -> list[dict]:
@@ -548,16 +614,20 @@ def add_food_entry(
         grams: Weight of the serving in grams.
         date: Date to log as YYYY-MM-DD (defaults to today).
         translation_id: Translation ID from search results (usually 0).
-        diary_group: Meal slot -- one of "auto", "breakfast", "lunch",
-                     "dinner", "snacks" (case-insensitive, default "auto").
+        diary_group: Meal slot -- "auto", a diary group name configured in
+                     CRONOMETER_DIARY_GROUPS (default breakfast, lunch,
+                     dinner, snacks), or "group N" for a group past the
+                     configured names, as get_food_log labels it;
+                     case-insensitive, default "auto".
                      "auto" picks by the current hour in the account's
                      timezone: breakfast 4-10, lunch 10-14, dinner 14-21,
-                     snacks otherwise.
+                     snacks otherwise. If that name isn't configured, the
+                     call fails; pass diary_group explicitly.
     """
     try:
         if isinstance(diary_group, str) and diary_group.strip().lower() == "auto":
             hour = _get_client().now().hour
-            diary_group = _DIARY_GROUP_NAMES[_meal_group_for_hour(hour)]
+            diary_group = _auto_diary_group(hour)
         day = date if date is not None else date_module_today().isoformat()
     except Exception as e:
         return _err(e)
@@ -589,8 +659,10 @@ def add_food_entries(entries: list[dict]) -> str:
 
     Args:
         entries: Objects with keys food_id, measure_id (from get_food_details;
-            0 is refused), grams, date (YYYY-MM-DD), diary_group (breakfast,
-            lunch, dinner, or snacks; "auto" is refused), and optionally
+            0 is refused), grams, date (YYYY-MM-DD), diary_group (a name
+            configured in CRONOMETER_DIARY_GROUPS, default breakfast, lunch,
+            dinner, snacks, or "group N" for a group past the configured
+            names, as get_food_log labels it; "auto" is refused), and optionally
             translation_id (default 0). Unknown keys are refused.
     """
     try:
@@ -755,11 +827,7 @@ def _parse_add_entry(item: object) -> dict:
     grams = item["grams"]
     if isinstance(grams, bool) or not _is_positive_number(grams):
         raise ValueError(f"grams must be a positive number, got {grams!r}")
-    group = item["diary_group"]
-    if not (isinstance(group, str) and group.strip().lower() in _DIARY_GROUPS):
-        raise ValueError(
-            f"diary_group must be breakfast, lunch, dinner, or snacks, got {group!r}"
-        )
+    group = _diary_group_number(item["diary_group"])
     translation_id = item.get("translation_id", 0)
     if type(translation_id) is not int or translation_id < 0:
         raise ValueError(
@@ -771,7 +839,7 @@ def _parse_add_entry(item: object) -> dict:
         "grams": grams,
         "translation_id": translation_id,
         "day": _iso_day(item["date"]),
-        "diary_group": _DIARY_GROUPS[group.strip().lower()],
+        "diary_group": group,
     }
 
 
@@ -1630,6 +1698,8 @@ def main():
     if dotenv_path and load_dotenv(dotenv_path, override=False):
         logger.info("Loaded .env from %s", dotenv_path)
 
+    # Fail at startup, not on the first tool call, if the group names are bad.
+    _diary_groups()
     mcp.run(transport="stdio")
 
 

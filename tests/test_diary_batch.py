@@ -190,6 +190,14 @@ def test_add_logs_every_item_in_order_with_one_food_lookup(fake):
         (_item(diary_group="auto"), "diary_group must be breakfast"),
         (_item(diary_group="brunch"), "diary_group must be breakfast"),
         (_item(diary_group=3), "diary_group must be breakfast"),
+        (_item(diary_group="group 4"), "diary_group must be breakfast"),
+        (_item(diary_group="group 0"), "diary_group must be breakfast"),
+        (_item(diary_group="group 05"), "diary_group must be breakfast"),
+        (_item(diary_group="group"), "diary_group must be breakfast"),
+        (_item(diary_group="group five"), "diary_group must be breakfast"),
+        (_item(diary_group="group -5"), "diary_group must be breakfast"),
+        (_item(diary_group="group5"), "diary_group must be breakfast"),
+        (_item(diary_group=5), "diary_group must be breakfast"),
         (_item(translation_id=-1), "translation_id must be a non-negative"),
         (_item(translation_id=False), "translation_id must be a non-negative"),
         (_item(translation_id="0"), "translation_id must be a non-negative"),
@@ -345,7 +353,16 @@ def test_add_food_entry_logs_through_the_batch_path(fake):
 
 
 @pytest.mark.parametrize(
-    "group,number", [("breakfast", 1), ("Lunch", 2), (" DINNER ", 3), ("snacks", 4)]
+    "group,number",
+    [
+        ("breakfast", 1),
+        ("Lunch", 2),
+        (" DINNER ", 3),
+        ("snacks", 4),
+        ("group 5", 5),
+        (" Group 6 ", 6),
+        ("group 12", 12),
+    ],
 )
 def test_add_food_entry_explicit_groups(fake, group, number):
     f = fake()
@@ -443,6 +460,8 @@ def test_add_food_entry_refuses_an_unknown_food(fake):
         ({"diary_group": ""}, "diary_group must be breakfast"),
         ({"diary_group": "1"}, "diary_group must be breakfast"),
         ({"diary_group": 3}, "diary_group must be breakfast"),
+        ({"diary_group": "group 4"}, "diary_group must be breakfast"),
+        ({"diary_group": "group 0"}, "diary_group must be breakfast"),
     ],
 )
 def test_add_food_entry_rejects_bad_fields_before_any_request(
@@ -655,3 +674,11 @@ def test_remove_food_entry_rejects_non_digit_ids_before_any_request(fake, bad):
     assert result["status"] == "error"
     assert "entry_ids must be digit strings" in result["message"]
     assert f.state["endpoints"] == []
+
+
+def test_extra_group_round_trips_through_the_food_log_label(fake):
+    """An entry written to "group 5" reads back under the same label."""
+    f = fake()
+    assert _add([_item(diary_group="group 5")])["count"] == 1
+    assert _logged(f, D1) == [(1234, 5, 100)]
+    assert server._group_name(5) == "group 5"

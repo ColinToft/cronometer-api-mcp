@@ -139,12 +139,24 @@ def test_diary_group_sets_the_order(tmp_path, frozen_utc, group, order):
     assert captured["payload"]["serving"]["order"] == order
 
 
-@pytest.mark.parametrize("group", [0, 5, -1, None, "2"])
-def test_add_serving_refuses_a_group_outside_1_to_4(tmp_path, frozen_utc, group):
+@pytest.mark.parametrize("group", [5, 6, 9])
+def test_add_serving_accepts_groups_added_in_the_app(tmp_path, frozen_utc, group):
     client = _client(tmp_path, "America/Los_Angeles")
     captured = _capture_serving(client)
 
-    with pytest.raises(ValueError, match="diary_group must be 1-4"):
+    client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=group)
+
+    assert captured["payload"]["serving"]["order"] == (group << 16) | 1
+
+
+@pytest.mark.parametrize("group", [0, -1, None, "2", 2.0, True])
+def test_add_serving_refuses_a_group_that_is_not_a_positive_int(
+    tmp_path, frozen_utc, group
+):
+    client = _client(tmp_path, "America/Los_Angeles")
+    captured = _capture_serving(client)
+
+    with pytest.raises(ValueError, match="diary_group must be a positive integer"):
         client.add_serving(food_id=1, measure_id=2, grams=100.0, diary_group=group)
 
     assert captured == {}
